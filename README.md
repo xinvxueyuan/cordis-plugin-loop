@@ -378,7 +378,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 沿用仓库脚手架：`.github/workflows/publish.yml` 做 **staged 发布**（`npm stage publish --provenance`，OIDC 可信发布 + 人工 2FA 批准后上线；同时可发 GitHub Packages），`.github/workflows/release.yml` 生成 `npm pack` 的 tgz + `SHA256SUMS` 并附 `actions/attest-build-provenance` 来源证明。CI 只跑 `npm ci` + `npm run typecheck` + `npm test`；`npm run test:integration` 需要本机真实 runtime，因此在本地发布前手动跑。
 
-### 发布记录：v0.1.0（2026-10-14）—— 未完成，已知阻塞见下
+### 发布记录：v0.1.0（2026-10-14）—— npm 侧被 skip（该缺口保留，修复版见 v0.1.1）
 
 | 项 | 值 |
 |---|---|
@@ -389,7 +389,20 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | CI | Release run [`38431103573`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103573) **success**；Publish run [`38431103637`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103637) **failure** → `Stage for npm` 与 `Publish to GitHub Packages` 两个 job 因此 **skipped** |
 | registry 现状 | npmjs.org：`@xinvxueyuan/cordis-plugin-loop` 为 404（**未发布、也没有 stage 队列条目**）；GitHub Packages：无该包 |
 
-**阻塞（已在后续版本修复）**：`test/loopfile.test.ts` 的两条用例——`DSH_HOME is resolved from the environment or the user home`（:91）与 `the candidate list is project first, then DSH_HOME`（:96）——断言的是 **Windows 路径语义**（期望 `C:\custom\.dsh` 与 `C:\project/.dsh/loop.md` 原样返回），在 Linux runner 上 `path.resolve` 会把 runner 的 cwd 前缀上去（实测得到 `/home/runner/work/cordis-plugin-loop/cordis-plugin-loop/C:\custom\.dsh`），于是 `npm test` 在 CI 上 115 pass / 2 fail，`publish.yml` 的 `test` job 失败、两个 `needs: test` 的发布 job 被 skip。修复方向：让这两条用例按 `path` 的平台语义构造期望值（或按平台跳过「绝对 Windows 路径原样返回」这类断言）。注意 `v0.1.0` 已随 Release 存在，**tag 不移动**，因此修复后应发**新版本号**（下一个补丁版本，具体发布事实见该版本的发布记录）。
+**阻塞（已在 v0.1.1 修复）**：`test/loopfile.test.ts` 的两条用例——`DSH_HOME is resolved from the environment or the user home`（:91）与 `the candidate list is project first, then DSH_HOME`（:96）——断言的是 **Windows 路径语义**（期望 `C:\custom\.dsh` 与 `C:\project/.dsh/loop.md` 原样返回），在 Linux runner 上 `path.resolve` 会把 runner 的 cwd 前缀上去（实测得到 `/home/runner/work/cordis-plugin-loop/cordis-plugin-loop/C:\custom\.dsh`），于是 `npm test` 在 CI 上 115 pass / 2 fail，`publish.yml` 的 `test` job 失败、两个 `needs: test` 的发布 job 被 skip。注意 `v0.1.0` 已随 Release 存在，**tag 不移动**，因此修复走新版本号（见下）。**该 npm 侧缺口因此从未补上：v0.1.0 在 npmjs 与 GitHub Packages 上都不存在。**
+
+### 发布记录：v0.1.1（2026-10-14）—— 测试已修、CI 的 Test 已绿；npm 侧卡在账号配置
+
+| 项 | 值 |
+|---|---|
+| tag | annotated + GPG `v0.1.1`；tag 对象 `e68b3fa0525fa849d64866907ad97d653ee414f0`，指向提交 `ce607fe30b0371bb510dfa2e2a331fd850da0757`；GitHub 侧 `verification.verified = true`（`reason: valid`）。`v0.1.0` 的 tag 对象仍是 `9ae22118…`（未移动） |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.1.1>，三资产：`xinvxueyuan-cordis-plugin-loop-0.1.1.tgz`（80 883 B）、`SHA256SUMS`、`SHA256SUMS.asc`（维护者对 `SHA256SUMS` 的分离签名，`gpg --verify` 为 Good signature） |
+| 构建来源证明 | `gh attestation verify <file> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.1.1` 对 tgz 与 SHA256SUMS 均**退出 0**；负向对照 `refs/heads/main` 与 `refs/tags/v0.1.0` 均被拒（`got refs/tags/v0.1.1`）⇒ 只命中本 tag |
+| tgz 校验 | 从 Release 下载后重算 SHA256 = `4d4e8f9223b0670eb50eb97945a99056952b83a469485476a87710fc91ac6a05`，与 `SHA256SUMS` 一致 |
+| CI | Release run [`38439675281`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38439675281) **success**；Publish run [`38439675414`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38439675414)：`Test (node 24)` **success**（121 用例）、`Publish to GitHub Packages` **success**、`Stage for npm` **failure**（执行了，不是 skip） |
+| registry 现状 | **npmjs.org：仍是 404 —— 无包、无 stage 条目**（`npm stage publish` 以 `E401 Unable to authenticate` 结束；provenance 已签名并写入 transparency log `logIndex=3245402958`，tarball shasum `a10cb56ac8184bbee69386ef7654f205a551bfbb`）；**GitHub Packages：已发布** `cordis-plugin-loop@0.1.1`，包 id `15868485`、版本 id `1380584577` |
+
+**npm 侧阻塞（未解决，动作在账号侧）**：`npm stage publish` 需要该包在 npmjs 上存在 **trusted publisher** 配置（把 `xinvxueyuan/cordis-plugin-loop` 与 `.github/workflows/publish.yml` 绑定），或首次发布用带 2FA 的凭据完成一次人工 `npm publish` 后再交给 OIDC 信任发布；否则 OIDC 换取 registry 凭据时得到 401。本仓发布流程明确不代做 2FA、不读 token，因此这一步留给维护者。配置完成后重推同一 tag 的流水线（或发下一个补丁版本）即可入队并拿到 stage id 与 shasum。
 
 ---
 
