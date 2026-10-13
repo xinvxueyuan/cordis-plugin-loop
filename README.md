@@ -364,6 +364,19 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 沿用仓库脚手架：`.github/workflows/publish.yml` 做 **staged 发布**（`npm stage publish --provenance`，OIDC 可信发布 + 人工 2FA 批准后上线；同时可发 GitHub Packages），`.github/workflows/release.yml` 生成 `npm pack` 的 tgz + `SHA256SUMS` 并附 `actions/attest-build-provenance` 来源证明。CI 只跑 `npm ci` + `npm run typecheck` + `npm test`；`npm run test:integration` 需要本机真实 runtime，因此在本地发布前手动跑。
 
+### 发布记录：v0.1.0（2026-10-14）—— 未完成，已知阻塞见下
+
+| 项 | 值 |
+|---|---|
+| tag | annotated + GPG `v0.1.0`；tag 对象 `9ae22118903dcf62bcd25c5f0031210063731623`，指向提交 `ca9cfcd72bd3fd30b3ed432a70c92bf0d2007747`；GitHub 侧 `verification.verified = true`（`reason: valid`，签名密钥 `6C6FD9B2394D19FD9CA1F247D6701FBD72B7B35A`） |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.1.0>，三资产：`xinvxueyuan-cordis-plugin-loop-0.1.0.tgz`、`SHA256SUMS`、`SHA256SUMS.asc`（`.asc` 由维护者用同一把 GPG 密钥对 `SHA256SUMS` 做分离签名后附加；`release.yml` 本身只产出前两者） |
+| 构建来源证明 | `actions/attest-build-provenance` 覆盖 tgz 与 SHA256SUMS；`gh attestation verify <file> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.1.0` 退出 0，`--source-ref refs/heads/main` 被拒（`expected SourceRepositoryRef to be refs/heads/main, got refs/tags/v0.1.0`） |
+| tgz 校验 | 从 Release 下载后重算 SHA256 = `2b9ea26c288852d02f95216eb507dbbe1ce02056333b1d42f9c198acd5a76a6e`，与 `SHA256SUMS` 记录一致；`SHA256SUMS.asc` 本地 `gpg --verify` 为 Good signature |
+| CI | Release run [`38431103573`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103573) **success**；Publish run [`38431103637`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103637) **failure** → `Stage for npm` 与 `Publish to GitHub Packages` 两个 job 因此 **skipped** |
+| registry 现状 | npmjs.org：`@xinvxueyuan/cordis-plugin-loop` 为 404（**未发布、也没有 stage 队列条目**）；GitHub Packages：无该包 |
+
+**阻塞（未解决）**：`test/loopfile.test.ts` 的两条用例——`DSH_HOME is resolved from the environment or the user home`（:91）与 `the candidate list is project first, then DSH_HOME`（:96）——断言的是 **Windows 路径语义**（期望 `C:\custom\.dsh` 与 `C:\project/.dsh/loop.md` 原样返回），在 Linux runner 上 `path.resolve` 会把 runner 的 cwd 前缀上去（实测得到 `/home/runner/work/cordis-plugin-loop/cordis-plugin-loop/C:\custom\.dsh`），于是 `npm test` 在 CI 上 115 pass / 2 fail，`publish.yml` 的 `test` job 失败、两个 `needs: test` 的发布 job 被 skip。修复方向：让这两条用例按 `path` 的平台语义构造期望值（或按平台跳过「绝对 Windows 路径原样返回」这类断言）。注意 `v0.1.0` 已随 Release 存在，**tag 不移动**，因此修复后应发**新版本号**（例如 `v0.1.1`）。
+
 ---
 
 <a id="english"></a>
