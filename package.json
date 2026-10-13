@@ -1,6 +1,6 @@
 {
   "name": "@xinvxueyuan/cordis-plugin-loop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cordis (DeepSeek Harness) plugin: the /loop command — run a task now, then keep it going on a fixed cadence or a model-chosen one",
   "type": "module",
   "main": "lib/index.js",
@@ -34,7 +34,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
-    "test": "node --test test/grammar.test.ts test/cadence.test.ts test/loopfile.test.ts test/state.test.ts test/command.test.ts test/tools.test.ts test/lifecycle.test.ts test/register.test.ts test/integration.test.ts",
+    "test": "node --test test/platform-neutral.test.ts test/grammar.test.ts test/cadence.test.ts test/loopfile.test.ts test/state.test.ts test/command.test.ts test/tools.test.ts test/lifecycle.test.ts test/register.test.ts test/integration.test.ts",
     "test:integration": "node test/integration-smoke.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

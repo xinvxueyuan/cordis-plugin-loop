@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import {
   clipToBytes,
@@ -89,13 +89,52 @@ test('clipToBytes leaves a short string alone and cuts a long one', () => {
 })
 
 test('DSH_HOME is resolved from the environment or the user home', () => {
-  assert.equal(dshHome({ DSH_HOME: 'C:\\custom\\.dsh' }), 'C:\\custom\\.dsh')
-  assert.match(dshHome({}), /\.dsh$/u)
+  // Every expectation here is built with the SAME API production uses. Asserting
+  // a raw literal back would encode Windows path semantics: on a POSIX runner
+  // `C:\custom\.dsh` is a relative *name*, so `resolve` prefixes the process cwd
+  // (CI run 38431103637 failed exactly there with
+  // `/home/runner/work/.../C:\custom\.dsh`).
+  const absolute = resolve(tmpdir(), 'custom', '.dsh')
+  assert.equal(dshHome({ DSH_HOME: absolute }), absolute, 'an absolute value is kept')
+
+  const relative = join('custom', '.dsh')
+  assert.equal(dshHome({ DSH_HOME: relative }), resolve(relative), 'a relative value is resolved, not kept raw')
+
+  assert.match(dshHome({}), /\.dsh$/u, 'with no DSH_HOME the user home is used')
 })
 
 test('the candidate list is project first, then DSH_HOME', () => {
-  const paths = loopFilePaths('C:\\project', { DSH_HOME: 'C:\\home\\.dsh' })
-  assert.deepEqual(paths, [join('C:\\project', '.dsh', 'loop.md'), join('C:\\home\\.dsh', 'loop.md')])
+  // Same construction as `loopFilePaths` itself: `resolve` for the seeds, `join`
+  // for the suffixes, so the expectation follows the host platform's separator
+  // and absoluteness rules instead of hardcoding either.
+  const cwd = resolve(tmpdir(), 'project')
+  const home = resolve(tmpdir(), 'home', '.dsh')
+  const paths = loopFilePaths(cwd, { DSH_HOME: home })
+  assert.deepEqual(paths, [join(cwd, '.dsh', 'loop.md'), join(home, 'loop.md')])
+})
+
+test('the path semantics these expectations depend on, per platform', () => {
+  // The assertion the Linux failure was missing. A drive-letter path is already
+  // absolute on win32, and only there; on POSIX it is a relative name that
+  // `resolve` prefixes with the process cwd. That is production behaviour (it is
+  // the only sensible reading of a relative name), so no test may assert such a
+  // literal back.
+  const windowsish = 'C:\\custom\\.dsh' // platform-probe-literal: this one IS the platform behaviour under test
+  assert.equal(dshHome({ DSH_HOME: windowsish }), resolve(windowsish))
+  if (process.platform === 'win32') {
+    assert.equal(resolve(windowsish), windowsish, 'win32: a drive-letter path is already absolute')
+  } else {
+    assert.notEqual(resolve(windowsish), windowsish, 'POSIX: it is relative, and resolve prefixes the cwd')
+    assert.ok(
+      dshHome({ DSH_HOME: windowsish }).startsWith(process.cwd()),
+      'POSIX: the resolved value is rooted at the process cwd',
+    )
+  }
+
+  // Candidates always use the platform's own separator, for either seed shape.
+  const [project] = loopFilePaths(resolve(tmpdir(), 'p'), { DSH_HOME: resolve(tmpdir(), 'h') })
+  assert.ok(project?.endsWith(join('.dsh', 'loop.md')), `expected a platform-built suffix, saw ${project}`)
+  assert.ok(!project?.includes(windowsish), 'the resolved candidate never embeds an unresolved literal')
 })
 
 test('the missing-task error lists both candidate paths', async () => {

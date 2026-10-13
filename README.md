@@ -232,6 +232,19 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 
 **计划模式契约**：宿主 `@deepseek-ai/dsh-plan-mode` 按 **agent** 取状态——`get(agent)` 返回 `{ active }`（有待定选择时另带 `pending`），`set(agent, active)` 选择；服务本身**没有** `active` 属性。因此谓词是 `planMode.get(agentRef)?.active === true`，`agentRef` 是调用命令的那个 live agent 对象（`get` 内部走 `agent.session`）。
 
+**为什么不改用会话投影绕过隔离（已按本 profile 的挂载形态实测）**：plan-mode 自己会注册一个会话投影 `plan`（`dsh-plan-mode/lib/index.js:179` 的 `ctx.sessionProjections.register(planProjectionDefinition)`，视图 `{ active, pending }`），而支撑服务 `session-projection` 在根层是启用的——看上去像一条能绕开隔离的路。实测结论是**不可行**，但机制比上一版写的更细，必须分两种作用域形态说清楚（`ctx.isolate` 的语义是**按服务名**隔离，不是「作用域一定有自己的实例」）：
+
+| 形态 | `ctx.sessionProjections` 解析到 | 登记表 | 从该作用域 `provide` 覆盖 |
+|---|---|---|---|
+| 子作用域**未**隔离该服务名（本 profile 的形态：`include:session-projection` 已在根层） | 与根层**同一张登记表**（实测 `shared registrations table: true`） | 共享 | **被拒**：`service "sessionProjections" has been registered at <SessionProjectionRegistry>` |
+| 子作用域**隔离了**该服务名 | 自己的实例（`scope resolves to the ROOT instance: false`、`shared registrations table: false`） | 独立 | 接受（覆盖只在该作用域内生效） |
+
+- 我上一版写的「作用域会得到自己的实例／根层登记表仍为空」只在不存在的隔离形态下成立，**已按实测改正**（见上表；两种形态我都跑了，原始输出在 t24 的证据里）。
+- 但**结论不变**，因为起决定作用的是**服务键**而不是登记表：在两种形态下 `root sees the planMode service: false` 都成立——plan-mode 作为 isolate 存在于各 preset 组，根层**既没有 `planMode` 服务，也没有它的 fiber**，所以它不会替根层注册任何东西（`root registrations AFTER scoped plan-mode mount: []`；我在此环境里也无法让 plan-mode 在作用域内激活：`plan-mode fiber state in scope: 0`，因为它的依赖在真实的 preset 组里，不在探针上下文里）。
+- 读 API 的形状同样决定了必须防御式调用：`snapshot(session, ['plan'])` 需要真实会话日志（对没有事件日志的会话抛 `SessionSeq must be a non-negative safe integer, got NaN`）；`cachedSnapshot(session, ['plan'])` 与 `stateOf(session, 'plan')` 在 key 未注册时都返回 `undefined`。
+- 结论：`planMode.get(agent)?.active === true` 仍是正确且够用的探测器——plan-mode 与插件**同作用域**时它生效（计划模式下零 create、零 delete），plan-mode 在别的 preset 组、或宿主根本没装 plan-mode 时它只是取不到 → **不拦截**（有意的降级，不是遗漏）。要让拒绝在根层真正可行使，需要**宿主侧**把 plan-mode 组合到根层（配置问题），或给插件一个跨隔离的读取扩展点（上游特性请求）。
+- 遗留不确定（诚实记录）：若将来某个 preset 组**激活** plan-mode 且该组**未**隔离 `sessionProjections`，则它那条 `register(...)` 会落到共享（根层）登记表，`plan` 键就可能被根层读到。我在此环境无法激活它来验证这一点，所以**不**据它改写行为（不写投机代码）；届时应重跑上表两组对照再决定是否改用它。
+
 **服务取值方式（惰性、可选）**：插件不直接写 `ctx.get('planMode')`，而是 `optional<PlanModeLike>(ctx, 'planMode')` —— 内部是 `ctx.reflect.get('planMode', false)`（`strict = false`）并包 try/catch，取不到就返回 `undefined`。这样**没有装 plan-mode 的 profile 不会因为读服务而报错**：探测函数直接是 `undefined`，插件照常工作、不做任何拦截；装了才走上面的 `get(agent)` 谓词。`PlanModeLike` 是本插件手写的窄接口（不用宿主的类型：`@deepseek-ai/dsh-plan-mode` 只是 devDependency，把它写进 `src` 会让 `lib/index.d.ts` 引用一个消费者可能没装的包），它与宿主签名的绑定由测试侧的编译期断言负责（见下）。
 
 拒绝位置在**任何写操作之前**：`/loop status` 仍可读，`/loop stop` 仍可停（一个已存在的 loop 必须随时可取消），但**新建**在计划模式下不触碰存储——即便 kill switch 同时开启，也是先按计划模式拒绝，不会顺手执行取消（那条路径会删记录）。
@@ -298,7 +311,7 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 ```bash
 npm run build             # tsc -p tsconfig.build.json → lib/
 npm run typecheck         # tsc --noEmit -p tsconfig.json
-npm test                  # node --test（本版 117 个用例；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
+npm test                  # node --test（本版 121 个用例；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
 npm run test:integration  # node test/integration-smoke.ts（真实 1 秒级投递冒烟）
 ```
 
@@ -308,6 +321,7 @@ npm run test:integration  # node test/integration-smoke.ts（真实 1 秒级投�
 |---|---|---|
 | 语法 / 节奏真值表 / 抖动 | 纯单元（假时钟） | `test/grammar.test.ts`、`test/cadence.test.ts` |
 | 默认任务文件（优先级 / 空文件 / 按字节截断） | 真实文件系统（临时目录） | `test/loopfile.test.ts` |
+| **平台中立守卫**（全测试集扫描：盘符字面量、模板字符串、正斜杠盘符） | 纯静态扫描（读 `test/*.ts` 源码，先屏蔽注释）+ 三种漏报形态与六种合法形态的自样本用例 | `test/platform-neutral.test.ts`（已列入 `npm test`；变异证明：把 Windows 期望注回 → `npm test` 120/121 红并指出该行） |
 | header 编解码 / 外来记录 / `v === 1` | 纯单元 | `test/state.test.ts` |
 | 命令语义（六种形式 + 拒绝面） | 直接驱动 `src/registry.ts`，假时钟 + catalogue 形状的 double | `test/command.test.ts` |
 | 命令**注册面与调用面** | **真实 `ctx.commands`（CommandRuntime）**：定义经 `normalizeDefinition` 接受，调用走 `parseCommand` + `command/run`/`command/done` 生命周期 | `test/register.test.ts` |
@@ -375,7 +389,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | CI | Release run [`38431103573`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103573) **success**；Publish run [`38431103637`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/38431103637) **failure** → `Stage for npm` 与 `Publish to GitHub Packages` 两个 job 因此 **skipped** |
 | registry 现状 | npmjs.org：`@xinvxueyuan/cordis-plugin-loop` 为 404（**未发布、也没有 stage 队列条目**）；GitHub Packages：无该包 |
 
-**阻塞（未解决）**：`test/loopfile.test.ts` 的两条用例——`DSH_HOME is resolved from the environment or the user home`（:91）与 `the candidate list is project first, then DSH_HOME`（:96）——断言的是 **Windows 路径语义**（期望 `C:\custom\.dsh` 与 `C:\project/.dsh/loop.md` 原样返回），在 Linux runner 上 `path.resolve` 会把 runner 的 cwd 前缀上去（实测得到 `/home/runner/work/cordis-plugin-loop/cordis-plugin-loop/C:\custom\.dsh`），于是 `npm test` 在 CI 上 115 pass / 2 fail，`publish.yml` 的 `test` job 失败、两个 `needs: test` 的发布 job 被 skip。修复方向：让这两条用例按 `path` 的平台语义构造期望值（或按平台跳过「绝对 Windows 路径原样返回」这类断言）。注意 `v0.1.0` 已随 Release 存在，**tag 不移动**，因此修复后应发**新版本号**（例如 `v0.1.1`）。
+**阻塞（已在后续版本修复）**：`test/loopfile.test.ts` 的两条用例——`DSH_HOME is resolved from the environment or the user home`（:91）与 `the candidate list is project first, then DSH_HOME`（:96）——断言的是 **Windows 路径语义**（期望 `C:\custom\.dsh` 与 `C:\project/.dsh/loop.md` 原样返回），在 Linux runner 上 `path.resolve` 会把 runner 的 cwd 前缀上去（实测得到 `/home/runner/work/cordis-plugin-loop/cordis-plugin-loop/C:\custom\.dsh`），于是 `npm test` 在 CI 上 115 pass / 2 fail，`publish.yml` 的 `test` job 失败、两个 `needs: test` 的发布 job 被 skip。修复方向：让这两条用例按 `path` 的平台语义构造期望值（或按平台跳过「绝对 Windows 路径原样返回」这类断言）。注意 `v0.1.0` 已随 Release 存在，**tag 不移动**，因此修复后应发**新版本号**（下一个补丁版本，具体发布事实见该版本的发布记录）。
 
 ---
 
