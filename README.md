@@ -22,6 +22,8 @@ DeepSeek Harness（DSH）插件：实现 `/loop` 指令 —— **立刻跑一轮
 - [自定节奏](#自定节奏)
 - [遗漏安全网](#遗漏安全网)
 - [停止与状态](#停止与状态)
+- [控制条](#控制条)
+- [模型工具](#模型工具)
 - [默认任务文件](#默认任务文件)
 - [拒绝面](#拒绝面)
 - [配置](#配置)
@@ -51,7 +53,7 @@ plugins:
 
 ## 语法
 
-六种调用形式，保留字**仅在整段输入精确匹配时**生效：
+七种调用形式，保留字**仅在整段输入精确匹配时**生效：
 
 | 形式 | 示例 | 行为 |
 |---|---|---|
@@ -61,6 +63,7 @@ plugins:
 | `/loop <interval> <task>` | `/loop 10m 盯住构建队列` | 固定节奏 + 指定任务 |
 | `/loop <task> every <interval>` | `/loop 盯住构建队列 every 10 minutes` | 同上（后缀写法） |
 | `/loop status\|stop [<短id>\|all]` | `/loop status`、`/loop stop 1f0f9a3c-7d2b-4a56-9f41-0c3b7a2e5d18`、`/loop stop all` | 只读状态 / 删除记录 |
+| `/loop next` | `/loop next` | **立刻投递一轮**（用户与模型起的 loop 都可用；固定节奏只投递这一轮、**不改写墙钟计时**，下一轮仍按原 cron 触发） |
 
 保留字规则（`status`、`stop` 大小写不敏感）：
 
@@ -200,10 +203,50 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 | `/loop stop <短id>` | 删除该记录并回报；id 不存在时明确报错并列出当前可用 id |
 | `/loop stop all` / 裸 `/loop stop` | 停止本会话全部 loop 并回报条数 |
 | 模型 `loop_stop(reason)` | 删除记录并回报原因；没有 loop 时是**失败调用**（`isError`），不是静默成功 |
+| `/loop next` | **立刻投递一轮**并回报；固定节奏的记录计时**不被改写**（下一轮仍按原 cron），自定节奏的记录重锚到 60s |
+| 模型 `loop_start(cadence, task, rounds?)` | 起一个 loop，**与 `/loop` 共享同一实现**（`startLoop`）；回执写明 `[agent]`、真实落盘节奏与轮数上限。详见[模型工具](#模型工具) |
+| 模型 `loop_status()` | 只读返回六字段（`active`/`mode`/`cadence`/`nextAt`/`round`/`startedBy`），与 `/loop status` **同源** |
+| 控制条「停止」/「立即下一轮」 | 走 `ctx.remote.commands.execute(sessionId, '/loop stop'\|'/loop next', [])`，即**上面这些命令本身**（不是第二条实现） |
 
 重复停止给出明确提示（`No loop is active in this session; nothing to stop.`），不会假装成功。
 
 短 id 是调度记录 id 去掉 `schedule-` 前缀后的原样 UUID（36 字符、含连字符），也就是 `/loop status` 每行开头显示的那个值：直接复制它即可，不必手写。
+
+---
+
+## 控制条
+
+**位置**：输入框上方的 `conversation.input.dock` 座位（宿主对该座位的官方措辞是 "Full-width entries above the composer card"），id=`loop`、order=5，排在 `todo`(0) 与 `goal`(10) 之间、`queue`(20) 之前。
+
+**它显示什么**：节奏（固定档打印归一后的墙钟节奏，自定档打印"每轮重定"）、下一轮倒计时（每秒重算）、轮次（`round`）、发起者（`你发起` / `模型发起`）。**没有活动 loop 时整块隐藏**——一个空控制条只会占地方。
+
+**它的两个操作**：
+
+| 按钮 | 走什么 | 效果 |
+|---|---|---|
+| 「停止」 | `ctx.remote.commands.execute(sessionId, '/loop stop', [])` | 与手打 `/loop stop` 完全相同：删除本会话记录并回报 |
+| 「立即下一轮」 | `ctx.remote.commands.execute(sessionId, '/loop next', [])` | 与手打 `/loop next` 完全相同：立刻投递一轮；固定节奏**不改写**墙钟计时 |
+
+按钮不是第二条实现：它发的是**同一批命令**，因此拒绝面（子代理、kill switch、参数校验）与手打命令逐字一致。命令失败时控制条**原样显示**宿主回的文本（`message (code)`），不吞错。
+
+**观感说明**：0.2.0 的控制条是**输入框上方的一行控制条**（读数 + 两个操作）。与 `/goal` 卡片视觉对齐（卡片化外壳、图标按钮）是 **0.2.1** 的后续项，本文不把它描述成卡片。
+
+---
+
+## 模型工具
+
+模型可以自己起 loop，不必等人在输入框打字。四个工具与 `/loop` **共享同一实现**（`startLoop`），零复制逻辑：
+
+| 工具 | 参数 | 行为 |
+|---|---|---|
+| `loop_start` | `task`、`cadence`（`fixed`/`self`）、`seconds`（固定档）、`rounds`（覆盖轮数上限） | 立刻投递第 1 轮并武装节奏；回执写明 `[agent]`、真实落盘节奏与轮数上限 |
+| `loop_status` | 无 | 只读六字段 `{active, mode, cadence, nextAt, round, startedBy}`，与 `/loop status`、与会话投影**同源**（`loopFactsOf`）；`nextAt` 可空且**总是返回该键** |
+| `loop_next` | `seconds`、`reason` | 续拍（自定节奏）；固定节奏会被明确拒绝并说明理由 |
+| `loop_stop` | `reason` | 停止并回报原因；没有 loop 时是**失败调用**（`isError`） |
+
+**轮数上限**：`loop_start` 起的 loop 与 `/loop` 起的一样受 `maxRounds`（默认 24）约束——达到上限由守卫结束该 loop，并把 `round-limit` 事件与最终说明写进会话。上限、7 天生命周期、两次遗漏是**三条独立**的结束路径，互不掩盖。
+
+**子代理边界**：子代理会话**不能**起/停 loop（宿主设计如此），`loop_start`/`loop_stop`/`loop_next`/`loop_status` 都会明确报错。
 
 ---
 
@@ -278,6 +321,7 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 | `omissionCheckSeconds` | `1200` | 60–3600 | 第 1 次遗漏后的安全检查等待 |
 | `minNextSeconds` | `60` | 60–3600 | `loop_next` 下限 |
 | `maxNextSeconds` | `3600` | 60–3600 | `loop_next` 上限 |
+| `maxRounds` | `24` | 1–100000 | **轮数上限**：用户起的与模型起的 loop 都适用；达到上限由守卫结束该 loop 并如实说明（见[与原文的偏差与边界](#与原文的偏差与边界)第 9 条） |
 | `maxTaskBytes` | `25000` | 1–1000000 | **inline 任务按码点计**的上限；同时是**默认任务文件按字节计**的截断预算 |
 
 校验失败直接抛错（不静默取默认）；`minNextSeconds > maxNextSeconds` 也拒绝。
@@ -301,6 +345,12 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 6. **header 用单行 JSON**（原文为人类可读一行；此处采用 JSON 以便严格解析）：格式、判据与"坏 header = 外来记录"的边界见 [loop 记录格式](#loop-记录格式)。
 7. **默认任务文件是"指针 + 每轮重读"**：记录不存文件副本，只存路径与重读指令；文件超预算时截断并记 `truncated: true`，同时提示模型自己完整读。
 8. **`DSH_DISABLE_LOOP` 的取值语义**：只有明确的否定拼写（`''`/`0`/`false`/`off`/`no`/`n`/`disabled`）算关闭，其它任何取值都算开启 —— kill switch 的失败方向必须是"仍然关闭"。计划模式探测是**可选**的：走 `ctx.reflect.get('planMode', false)`，取不到就不拦截（详见[拒绝面](#拒绝面)的「服务取值方式」）。
+9. **轮数上限的两条诚实边界**：① 上限**只在守卫能读到回执时执行**——`agent/turn-stopping` 是计数入口，若该事件没有发生（例如会话在轮中被中断），上限不会当场生效，要等下一次有回执的收尾才结算；「立即下一轮」按钮轮**计入**上限（V1：预算评估已移到"零回执早退"之前），但计数依据仍是**回执**而不是按钮次数。② `maxRounds > 10000` 时回执读取会报 `truncated`，此时**按下界执行**（宁可少算也不漏停），回执文本会如实写出这一点。
+10. **固定节奏下未按按钮时，注入头可能重复上一轮号**（V2，v0.1.x 既有偏差）：固定档记录的存储 prompt 只在 `loop_next` /「立即下一轮」时重写，cron 自己触发的那几轮沿用上一次写入的 `iteration`，于是真机可能看到"头里写 2、投影已经是 3"。**投影 / `loop_status` 才是诚实值**（按 `ctx.schedule.history` 回执算），头里的 `iteration` 只作提示。
+11. **自定节奏 loop 的首次到期投递携带起 loop 时渲染的 prompt**：记录存的是指针 + 每轮重读指令，但**第一次到期投递**用的是创建时已渲染好的那份 prompt；任务文件在那之后改动，从**第二次**投递起才反映（默认任务文件的每轮重读不受影响——这是"首次"这一格的边界）。
+12. **会话投影的推送边界**：`@deepseek-ai/dsh-session-projection` 只在 **state 与 wire view 引用同时变化**时推帧。因此投影值必须**按镜像 `revision` 重建**（每次变更换一个新对象）；"只给 state 加一个 revision 字段"不够——wire 侧看不到引用变化就不会推。0.2.0 的 `loop` 投影按这条实现（真 registry 实测）。
+13. **重启后的投影自愈延迟（V5-3）**：宿主重启后，**未被本实例服务过**的会话即使存储里有它的 loop，投影仍会读到 NO_LOOP，直到该会话发生一次带 sessionId 的入队活动（turn 结束 / 命令 / 工具调用）。控制条因此**最多延迟一个周期**才显示，之后自愈。
+14. **已知宿主限制：子代理会话的 client inspect 会被拒**。在子代理会话里对 `client/Slots`、`client/Builtin`、`client/Theme` 发 inspect 查询会被 `session/agent-busy: … owned by subagent routing` 拒绝（或 10 秒超时）。**真实浏览器 DOM 不受此限** ⇒ 需要活体取证时用页面 DOM（控制条自己渲染的 `data-dsh-loop-state` / `data-dsh-loop-active` 就是为此留的锚），不要据此判定"控制条没挂上"。
 
 其他边界：`/loop status` 与 `stop` 只看本会话、本插件自己的记录；header 损坏的外来记录既不列出也不删除；子代理永远没有自己的 loop；固定节奏记录由 cron 自己推进，**不依赖**本进程存活到下一次触发。
 
@@ -311,8 +361,16 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 ```bash
 npm run build             # tsc -p tsconfig.build.json → lib/
 npm run typecheck         # tsc --noEmit -p tsconfig.json
-npm test                  # node --test（本版 121 个用例；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
+npm test                  # node --test（本版 200 个用例 / 10 suites；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
 npm run test:integration  # node test/integration-smoke.ts（真实 1 秒级投递冒烟）
+npm run test:smoke:client # node test/client-live-smoke.ts（真 client.js 字节 + 真命令 runtime + 真工具 registry）
+```
+
+**主题 token 对账（可选，建议发布前跑一次）**：`test/client-capsule.test.ts` 冻结了 403 个主题 token 名做守卫，只有设了 `DSH_THEME_CLIENT` 时才与**实际安装的主题**对账。发布前顺手跑一次，主题改名会让守卫**指名道姓**地红：
+
+```bash
+DSH_THEME_CLIENT="<profiles>/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js" \
+  node --test test/client-capsule.test.ts
 ```
 
 测试分层（**每一层的边界如实标注**）：
@@ -323,12 +381,15 @@ npm run test:integration  # node test/integration-smoke.ts（真实 1 秒级投�
 | 默认任务文件（优先级 / 空文件 / 按字节截断） | 真实文件系统（临时目录） | `test/loopfile.test.ts` |
 | **平台中立守卫**（全测试集扫描：盘符字面量、模板字符串、正斜杠盘符） | 纯静态扫描（读 `test/*.ts` 源码，先屏蔽注释）+ 三种漏报形态与六种合法形态的自样本用例 | `test/platform-neutral.test.ts`（已列入 `npm test`；变异证明：把 Windows 期望注回 → `npm test` 120/121 红并指出该行） |
 | header 编解码 / 外来记录 / `v === 1` | 纯单元 | `test/state.test.ts` |
-| 命令语义（六种形式 + 拒绝面） | 直接驱动 `src/registry.ts`，假时钟 + catalogue 形状的 double | `test/command.test.ts` |
+| 命令语义（七种形式 + 拒绝面） | 直接驱动 `src/registry.ts`，假时钟 + catalogue 形状的 double | `test/command.test.ts` |
 | 命令**注册面与调用面** | **真实 `ctx.commands`（CommandRuntime）**：定义经 `normalizeDefinition` 接受，调用走 `parseCommand` + `command/run`/`command/done` 生命周期 | `test/register.test.ts` |
 | 两个工具 | **真实 `ctx.tools`（ToolRuntime）**：schema 编译 + `execute` + `isError` 语义 | `test/tools.test.ts` |
 | 自定节奏 / 两次遗漏 / 过期 | 引擎直调（假时钟）+ **真实 cordis 事件派发**（`ctx.emit('agent/turn-stopping')`） | `test/lifecycle.test.ts` |
 | 惰性 / 计划模式 / kill switch / 时区 | **真实 `apply`**（有/无 `schedule`、有/无 `commands`） | `test/register.test.ts` |
 | 记录生成与真实投递 | **真实 `@deepseek-ai/dsh-schedule` + 真实 `dsh-storage-json` 本地后端 + 真实 `dsh-tools`/`dsh-agent`**，1 秒级 one-shot 走真实 runtime 定时器 | `test/integration.test.ts`、`test/integration-smoke.ts` |
+| **客户端半（控制条）** | 真跑 `client.js` 字节：假 `window.__ModuleLoader__` + React 桩 + 共享 hook 槽；断言注册项 `{id:'loop',order:5}`、座位注入、读数逐字段、按钮的**真实调用参数**、zh/en 键集一致、主题 token 守卫（含变异自检） | `test/client-capsule.test.ts` |
+| **控制条 → 命令的真实通路** | 真 registry + 真命令 runtime + 真工具 registry + 真 `client.js` 字节（仅 `ctx.schedule` 为 double） | `test/client-live-path.test.ts`、`test/client-live-smoke.ts` |
+| 投影变更 feed | 真 `@deepseek-ai/dsh-session-projection` 注册表 | `test/projection-smoke.ts` |
 
 两处**刻意保留的缺口**，都留给发布前闸门：
 
@@ -408,9 +469,40 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 ---
 
+### profile 基线观察（T5-F4 留痕，只读）
+
+`profiles/**` 是受保护文件（内含明文密钥），本项目对它们**只做只读元数据留痕**（mtime + sha256 + 字节数）：**从未读取内容、从未写入**。
+
+| 观察时间 | web | desktop | headless |
+|---|---|---|---|
+| 2026-10-16 22:26:29（T5-F4 原始观察：三份**同秒**被原子重写，无法归因） | `f6825e04…`（31103 B） | `d79e2323…`（17253 B） | `9fb81c32…`（16676 B） |
+| 2026-10-17（**现状基线**；来源待用户确认，未读取内容） | `e92747a6…`（30343 B，14:26:16） | `62138067…`（16518 B，06:53:25） | `f890aae4…`（15941 B，06:53:25） |
+
+旁证（不改变挂载结论）：宿主 14:20:27 重启（PID 22836），web patch 的 mtime 晚于它 5 分 49 秒（配置层热生效）；改后 `host/Config entry=include:loop` 仍正常（schema 含 `maxRounds` default 24），四个工具 4/4 在列 ⇒ **挂载行与依赖面未受影响**。
+
+### 发布记录：v0.2.0（2026-10-17）—— **已上线 npm（`latest`）**
+
+| 项 | 值 |
+|---|---|
+| tag | annotated + GPG `v0.2.0`；tag 对象 `84dbce4b58f784a71cd56d572c53650120eb8669`，指向提交 `1615530ab5fff217f77e995cea66e5b5eb4bd73c`；本地 `git tag -v` 为 `Good signature from "xinvxueyuan (github)"`（密钥 `6C6FD9B2394D19FD9CA1F247D6701FBD72B7B35A`）。`v0.1.0`（`9ae22118…`）与 `v0.1.1`（`e68b3fa0…`）**未移动** |
+| 提交 | `1615530a`「release: v0.2.0 — agent-startable loops and a control capsule above the composer」，**26 条显式路径**（无 `lib/`、无 `node_modules/`、未用 `git add -A`／`.`），26 files changed, 5929 insertions(+), 117 deletions(-)；push `main` 后该 sha **命中 0 条 workflow run**（未触发发布） |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.2.0>，三资产：`xinvxueyuan-cordis-plugin-loop-0.2.0.tgz`（132 840 B）、`SHA256SUMS`（107 B）、`SHA256SUMS.asc`（887 B，维护者对 `SHA256SUMS` 的分离签名，`gpg --verify` 为 Good signature） |
+| 构建来源证明 | `gh attestation verify <file> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.2.0` 对 tgz 与 SHA256SUMS 均**退出 0**；负向对照 `refs/heads/main` 被拒（`Error: expected SourceRepositoryRef to be refs/heads/main, got refs/tags/v0.2.0`）⇒ 只命中本 tag |
+| tgz 校验 | 从 Release 下载后重算 SHA256 = `2a5c399f28f14966ff0b9e736d5d571ad368745a712eefaee7310781b52f07e3`，与 `SHA256SUMS` 逐字一致；该 tgz 的 **SHA1 = `884cd49ebb6c0350fbbd1bb49b856fb972bb2ec2`**，与 CI 的 stage shasum 相同 ⇒ Release 的字节与入队的是同一份 |
+| CI | Release run [`39015255952`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39015255952) **success**；Publish run [`39015255957`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39015255957) **success**，三个 job 全绿：`Test (node 24)`（`tests 200 · suites 10 · pass 200 · fail 0 · duration_ms 3116.794768`）、`Publish to GitHub Packages`、`Stage for npm (trusted publishing + human 2FA approval)` |
+| npm stage | **stage id `90e2b658-16a9-45c6-84c6-296ee5906df6`、shasum `884cd49ebb6c0350fbbd1bb49b856fb972bb2ec2`、provenance `logIndex=3291648377`**；`npm stage list` 只读复核为 `staged by: GitHub Actions (trusted automation)`、`tag: latest`、`access: public`（与 CI 日志逐字一致） |
+| npm 上线 | **`npm install @xinvxueyuan/cordis-plugin-loop` 可用**：`0.2.0` 于 **2026-10-17T07:57:15.364Z** 上线（UTC；= 2026-10-17 15:57:15 +08:00），`dist-tags.latest = 0.2.0`、`dist.shasum = 884cd49ebb6c0350fbbd1bb49b856fb972bb2ec2`（与 stage 回执逐字一致）、`dist.attestations.provenance.predicateType = https://slsa.dev/provenance/v1`。批准动作由**维护者本人在 2FA 下**执行（`npm stage approve <stage-id>`），发布者未代做 |
+| registry 现状 | npmjs.org：`versions = ["0.0.0-stage", "0.0.1", "0.1.1", "0.2.0"]`、`latest = 0.2.0`（批准后 `npm stage list` 返回 `No staged versions of package name …` ⇒ 队列已清）；**GitHub Packages：`cordis-plugin-loop@0.2.0`**，包 id `15868485`、版本 id `1400920214`（2026-10-17T07:52:54Z） |
+| 版本固化 | `package.json` + `package-lock.json` 两处（根 `version` 与 `packages[""].version`）同步为 `0.2.0`；`npm ci --dry-run` exit 0；`npm pack --dry-run` 含 `client.js`（26.6 kB）与 14 条 `src/`，凭据类条目 **0** |
+| 验证 | 冻结字节上：`npm run build` / `npm run typecheck` / `npm test`（**200/200 · 10 suites · 3395.3193 ms · 自然退出**）/ `npm run test:integration`（`integration smoke: OK`）全 **exit 0**；主题对账（`DSH_THEME_CLIENT`）**41/41**；版本固化后复跑 build/typecheck/test 仍全绿（**200/200 · 3052.2314 ms**） |
+| 推送前密钥扫描 | 43 文件 × 12 类厂商形状（`ghp_`/`npm_`/`AKIA`/`glpat-`/`sk-`/`Bearer`/私钥块/基本认证 URL 等）**0 命中** |
+| 已知后续 | 控制条的**观感**（卡片化外壳、图标按钮）与 `/goal` 尚未对齐，列为 **0.2.1** 的后续项；"子代理会话的 client inspect 会被拒"这条宿主限制见上面的边界第 14 条 |
+
+---
+
 <a id="english"></a>
 ## English
 
 `@xinvxueyuan/cordis-plugin-loop` implements DSH's `/loop`: run a task **now**, then keep it running on a fixed wall-clock cadence (cron + deterministic jitter) or a self-paced one (`loop_next` / `loop_stop`). Each loop is one durable `@deepseek-ai/dsh-schedule` task whose title and prompt carry all of its mutable state, so a continuation, a stop, and the omission safety net are all one in-place `ctx.schedule.update` — a session never owns more than one loop record.
 
-Six call forms, wall-clock cron for every fixed cadence, nearest-step snapping with ties upward, `min(10% of the normalized period, 900s)` of jitter drawn from a stable fingerprint and expressed in the cron phase, a 7-day lifetime, a two-strike omission guard on `agent/turn-stopping`, `.dsh/loop.md` default tasks that are re-read every round through a pointer, plan-mode and kill-switch refusals, and an inert path when `ctx.schedule` is absent. See the Chinese sections above for the per-band truth table, the header format and its foreign-record boundary, the configuration table, and the deviation list.
+Seven call forms (plus `/loop next` to deliver a round immediately), wall-clock cron for every fixed cadence, nearest-step snapping with ties upward, `min(10% of the normalized period, 900s)` of jitter drawn from a stable fingerprint and expressed in the cron phase, a configurable round limit (`maxRounds`, default 24), a 7-day lifetime, a two-strike omission guard on `agent/turn-stopping`, `.dsh/loop.md` default tasks that are re-read every round through a pointer, plan-mode and kill-switch refusals, and an inert path when `ctx.schedule` is absent. The model can also start and read a loop itself through the `loop_start` / `loop_status` tools — the same `startLoop` implementation the `/loop` command uses — and a control bar above the composer (`conversation.input.dock`, id `loop`, order 5) shows the cadence, the next-round countdown, the round number and the starter, with stop / next-round buttons that simply execute `/loop stop` / `/loop next` through `ctx.remote.commands.execute`. Card-style visual parity with `/goal` is a 0.2.1 follow-up. See the Chinese sections above for the per-band truth table, the header format and its foreign-record boundary, the configuration table, and the deviation list.
