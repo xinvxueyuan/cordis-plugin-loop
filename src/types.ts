@@ -10,12 +10,28 @@
 /** Which engine drives a loop. */
 export type LoopMode = 'fixed' | 'self'
 
+/**
+ * Who armed a loop.
+ *
+ * A person through `/loop`, or the model through the `loop_start` tool. The
+ * distinction is durable because the round cap reads it: a loop the model armed
+ * on its own initiative must not run unattended for a week.
+ */
+export type LoopStartedBy = 'user' | 'agent'
+
 /** The complete, durable live state of one loop. */
 export interface LoopState {
   /** Prefix of the loop that created this record, for `status` and `stop`. */
   readonly owner: string
   /** Which engine drives the loop. */
   readonly mode: LoopMode
+  /**
+   * Who armed the loop.
+   *
+   * A record written before this field existed decodes as `user`, so an
+   * upgraded profile keeps its live loops and still honours their cadence.
+   */
+  readonly startedBy: LoopStartedBy
   /** Normalized cadence in seconds; `0` for a self-paced loop. */
   readonly cadenceSeconds: number
   /** Canonical cadence text; `self-paced` for a self-paced loop. */
@@ -71,6 +87,23 @@ export interface DeliveryReceiptLike {
   readonly messageId: string
 }
 
+/**
+ * How many rounds one record's retained history proves were delivered.
+ *
+ * `count` is the number of receipts this plugin read; `truncated` says the read
+ * stopped at the pagination ceiling with older pages still outstanding, so a
+ * caller comparing `count` against a limit must treat it as a lower bound and
+ * say so rather than reporting a count it did not establish.
+ */
+export interface DeliveryTally {
+  /** Receipts read, newest first, across every page the read walked. */
+  readonly count: number
+  /** Whether the walk stopped at its ceiling while older pages remained. */
+  readonly truncated: boolean
+  /** Whether the service reported that receipts were dropped by retention. */
+  readonly pruned: boolean
+}
+
 /** Structural view of the `ctx.schedule` service this plugin uses. */
 export interface SchedulePort {
   create(
@@ -100,7 +133,24 @@ export interface SchedulePort {
     limit: number
     before?: string
   }): Promise<
-    | { readonly id: string; readonly records: readonly DeliveryReceiptLike[]; readonly earlierRecordsUnavailable: boolean }
+    | {
+        readonly id: string
+        readonly records: readonly DeliveryReceiptLike[]
+        readonly earlierRecordsUnavailable: boolean
+        /**
+         * Exclusive cursor for the next older page.
+         *
+         * The live service caps one read at 100 records and publishes this
+         * cursor only while older receipts remain, so it is the whole signal a
+         * caller needs to know whether the page it got is the entire history.
+         * Optional in the seam because a partial double may not paginate: an
+         * absent cursor means "no more pages", which degrades to a lower bound
+         * rather than to a wrong count.
+         */
+        readonly nextBefore?: string
+        /** Whether receipts older than the retained window were dropped. */
+        readonly earlierRecordsPruned?: boolean
+      }
     | { readonly id: string; readonly code: string }
   >
   delete(request: { sessionId: string; id: string }): Promise<{ readonly id: string; readonly deleted: boolean; readonly code?: string }>

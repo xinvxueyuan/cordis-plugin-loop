@@ -44,7 +44,7 @@ export interface StubAgent {
   readonly session: {
     readonly id: string
     /** Session metadata the plugin reads: working directory and delegation origin. */
-    readonly header: { cwd?: string; origin?: string }
+    readonly header: { id?: string; cwd?: string; origin?: string }
     /** Log-only lifecycle append channel the real command runtime uses. */
     readonly append: (type: string, data: unknown) => void
   }
@@ -190,6 +190,16 @@ export interface BootOptions {
    * `agent/turn-stopping` path without waiting for a real timer.
    */
   readonly scheduleDouble?: SchedulePort
+  /**
+   * Mount the assembly on an existing root context instead of a fresh one.
+   *
+   * A test that must observe the plugin through a *host service* — the real
+   * `SessionProjectionRegistry`, whose registration the plugin performs on the
+   * very context it was handed — has to give the plugin that same context.
+   * Supplying one here is what makes such a test exercise the shipped wiring
+   * instead of two unrelated registries that happen to share a name.
+   */
+  readonly ctx?: Context
 }
 
 /** One waiter for a future delivery. */
@@ -218,7 +228,7 @@ export class StubAgentImpl implements StubAgent {
   readonly session: {
     readonly id: string
     /** Session metadata the plugin reads: working directory and delegation origin. */
-    readonly header: { cwd?: string; origin?: string }
+    readonly header: { id?: string; cwd?: string; origin?: string }
     /** Log-only lifecycle append channel the real command runtime uses. */
     readonly append: (type: string, data: unknown) => void
   }
@@ -239,7 +249,10 @@ export class StubAgentImpl implements StubAgent {
     this.id = sessionId
     this.session = {
       id: sessionId,
-      header: {},
+      // The real `SessionHeader` always carries the session id, and the loop
+      // projection binds a cell to its session by reading exactly this field, so
+      // a double without it would exercise a shape the host never produces.
+      header: { id: sessionId },
       append: (type: string, data: unknown): void => {
         this.lifecycle.push({ type, data })
       },
@@ -478,7 +491,7 @@ export async function bootHost(options: BootOptions = {}): Promise<LoopHost> {
   const cwd = options.cwd ?? root
   const agent = createStubAgent(sessionId)
   agent.session.header.cwd = cwd
-  const ctx = new Context()
+  const ctx = options.ctx ?? new Context()
   const root0 = ctx as unknown as {
     plugin: (plugin: unknown, config?: unknown) => { await(): Promise<unknown>; dispose(): Promise<void> }
     provide: (name: string, value: unknown) => void
@@ -559,6 +572,10 @@ export async function bootHost(options: BootOptions = {}): Promise<LoopHost> {
     options.config ?? {},
   )
   await fiber.await()
+  // The agent registry announces every live agent with `agent/created`; the loop
+  // plugin registers its session-projection unit on that edge, so the stub agent
+  // has to be announced the same way or the projection would never exist here.
+  ;(ctx as unknown as { emit: (event: string, payload: unknown) => void }).emit('agent/created', { agent })
   if (process.env['LOOP_TEST_DEBUG'] === '1') {
     const debugCtx = ctx as unknown as { reflect: { get(name: string, strict?: boolean): unknown } }
     const states = {
@@ -632,7 +649,7 @@ export async function bootHost(options: BootOptions = {}): Promise<LoopHost> {
         id: string
         session: {
           readonly id: string
-          readonly header: { cwd?: string; origin?: string }
+          readonly header: { id?: string; cwd?: string; origin?: string }
           readonly append: (type: string, data: unknown) => void
         }
       }

@@ -249,6 +249,7 @@ test('the cancel path keeps the owner check: another session\'s header is not ca
   const foreign = buildPrompt({
     owner: ownerOf('session-b'),
     mode: 'fixed',
+    startedBy: 'user',
     cadenceSeconds: 600,
     cadenceLabel: 'every 10 minutes',
     fingerprint: 'abcdef0123456789',

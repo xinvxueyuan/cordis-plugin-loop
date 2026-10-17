@@ -14,6 +14,7 @@ function state(overrides: Partial<LoopState> = {}): LoopState {
   return {
     owner: ownerOf('session-a'),
     mode: 'fixed',
+    startedBy: 'user',
     cadenceSeconds: 600,
     cadenceLabel: 'every 10 minutes',
     fingerprint: 'abcdef0123456789',
@@ -55,6 +56,29 @@ test('the header carries every live counter and the expiry', () => {
   assert.equal(payload['expiresAt'], 1_700_000_000_000)
   assert.equal(payload['mode'], 'fixed')
   assert.equal(payload['cadence'], 600)
+  assert.equal(payload['startedBy'], 'user', 'the origin travels with the record')
+})
+
+test("a record written before `startedBy` existed decodes as a user loop", () => {
+  // Backward compatibility is load-bearing: decoding an old record as `agent`
+  // would silently subject a person's live loop to a round cap.
+  const legacy = `${MARKER} {"v":1,"owner":"o","mode":"fixed","cadence":600,"cadenceLabel":"x","fingerprint":"f","iteration":0,"quiet":0,"omissions":0,"expiresAt":1}`
+  const decoded = decodeLoopRecord(record(legacy))
+  assert.ok(decoded !== undefined)
+  assert.equal(decoded.state.startedBy, 'user')
+  // A nonsense value is not trusted either.
+  const nonsense = `${MARKER} {"v":1,"owner":"o","mode":"fixed","startedBy":"somebody","cadence":600,"cadenceLabel":"x","fingerprint":"f","iteration":0,"quiet":0,"omissions":0,"expiresAt":1}`
+  assert.equal(decodeLoopRecord(record(nonsense))?.state.startedBy, 'user')
+})
+
+test('an agent-armed record round-trips its origin and says so in the title', () => {
+  const original = state({ startedBy: 'agent', task: 'watch the queue' })
+  const { prompt } = buildPrompt(original)
+  const decoded = decodeLoopRecord(record(prompt))
+  assert.ok(decoded !== undefined)
+  assert.equal(decoded.state.startedBy, 'agent')
+  assert.equal(buildTitle(original), '[agent] DSH /loop: watch the queue')
+  assert.equal(buildTitle(state({ task: 'watch the queue' })), 'DSH /loop: watch the queue')
 })
 
 test('a foreign or broken record decodes as undefined', () => {

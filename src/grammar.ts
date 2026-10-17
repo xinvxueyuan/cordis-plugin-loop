@@ -1,8 +1,9 @@
 /**
  * The `/loop` command grammar.
  *
- * Six call forms are accepted; the two reserved words are only reserved when
- * the whole input matches them exactly, so `stop the build` stays a task.
+ * Eight call forms are accepted; the reserved words (`status`, `stop`, `next`)
+ * are only reserved when the whole input matches them exactly, so
+ * `stop the build` and `next steps for the review` stay task text.
  * @module cordis-plugin-loop/grammar
  */
 
@@ -25,6 +26,7 @@ export type LoopCommand =
   | { readonly kind: 'task'; readonly task: string }
   | { readonly kind: 'interval-task'; readonly interval: IntervalLiteral; readonly task: string }
   | { readonly kind: 'status' }
+  | { readonly kind: 'next' }
   | { readonly kind: 'stop'; readonly selector: 'all' | string | undefined }
 
 /** Seconds per supported unit; spelled-out synonyms map onto the same base. */
@@ -88,6 +90,9 @@ export function parseLoopInput(rawInput: string): LoopCommand {
   if (input.length === 0) return { kind: 'naked' }
   const lowered = input.toLowerCase()
   if (lowered === 'status') return { kind: 'status' }
+  // `next` is the composer capsule's "run the next round now". Like `stop`, it
+  // is only reserved on an exact whole-input match.
+  if (lowered === 'next') return { kind: 'next' }
   if (lowered === 'stop') return { kind: 'stop', selector: undefined }
   // `stop` followed by a selector is the stop form. Anything else after `stop`
   // reads as task text, so `/loop stop the world` still starts a loop.

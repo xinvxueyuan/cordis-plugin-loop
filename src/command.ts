@@ -48,7 +48,7 @@ export function buildLoopCommand(deps: CommandDeps): LoopCommandDefinition {
     definitionId: COMMAND_DEFINITION_ID,
     name: 'loop',
     description: 'Run a task now, then keep checking it on a cadence',
-    input: { hint: '[<interval>] [<task>] | status | stop [<id>|all]' },
+    input: { hint: '[<interval>] [<task>] | status | next | stop [<id>|all]' },
     handler: async (invocation) => {
       const caller = deps.callerFrom(invocation.agent)
       if (caller === undefined) {

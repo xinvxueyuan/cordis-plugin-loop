@@ -8,34 +8,61 @@
  * @module cordis-plugin-loop
  */
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { buildLoopCommand } from './command.ts'
 import { Config, killSwitchFromEnv, resolveConfig, type LoopConfig } from './config.ts'
 import { LoopEngine } from './engine.ts'
-import { createQueue, handleTurnStopping, runLoopCommand, type Caller, type RegistryDeps } from './registry.ts'
-
-/**
- * Register this plugin's own message source.
- *
- * `dsh-experimental-auto-review` skips messages tagged `kind: 'tool'`, and that
- * tag belongs to tool-role results anyway, so a plugin that injects rounds must
- * declare a kind of its own — mirroring the way `dsh-schedule` declares
- * `'schedule'`.
- */
-declare module '@deepseek-ai/dsh-llm' {
-  interface MessageSourceMap {
-    /** One immediate round injected by `/loop`. */
-    loop: { kind: 'loop' }
-  }
-}
-import { defineLoopNextTool, defineLoopStopTool } from './tools.ts'
+import { LoopProjectionStore, loopFactsOf, loopProjectionDefinitionFor } from './loop-projection.ts'
+import { loopMessage } from './message.ts'
+import {
+  createQueue,
+  handleTurnStopping,
+  runLoopCommand,
+  type Caller,
+  type Enqueue,
+  type LoopEvent,
+  type RegistryDeps,
+} from './registry.ts'
+import { defineLoopNextTool, defineLoopStartTool, defineLoopStatusTool, defineLoopStopTool } from './tools.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SchedulePort, ScheduleRecordLike } from './types.ts'
 
+/**
+ * The schedule service's post-commit announcement, declared here for the same
+ * reason as {@link SessionProjectionsLike}: this plugin reads the event
+ * structurally rather than importing `@deepseek-ai/dsh-schedule`, so the
+ * package's own `declare module '@deepseek-ai/cordis'` augmentation is not in
+ * this program's module graph and the event key would look unknown. The event
+ * itself is real — `ScheduleService.emitChanged()` emits it after every durable
+ * task write, including a delivery — and the test suite asserts the wiring
+ * against the live service, which is where the two declarations meet.
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** Durable schedule state changed; emitted after every committed task write. */
+    'schedule/changed'(): void
+  }
+}
+
 /** Cordis plugin name. */
 export const name = 'cordis-plugin-loop'
-/** `tools` is required to register the continuation tools; everything else is optional. */
-export const inject = ['tools']
+/**
+ * The two services this plugin cannot do anything without, declared as hard
+ * dependencies so Cordis activates the plugin only once both are provided.
+ *
+ * `tools` carries the four continuation tools. `schedule` is the backend the
+ * whole feature is about: `apply` used to *probe* for it and return early when
+ * it was missing, which a cold start can trigger — the loader composes its
+ * entries in one pass, and a service is only in the store after its own fiber
+ * has provided it. The plugin was then activated with an ACTIVE fiber, logged
+ * one warning and registered nothing at all, permanently, because nothing
+ * re-runs `apply` (T15: no tools, no `/loop` until an unrelated reload).
+ * Declaring `schedule` here makes activation wait for it instead of guessing.
+ *
+ * `commands` is deliberately NOT in this list: the command surface is optional,
+ * the tools must never be held hostage by it, and a registry that appears late
+ * is picked up reactively where the command is registered below.
+ */
+export const inject = ['tools', 'schedule']
 export { Config }
 export type { LoopConfig }
 
@@ -89,6 +116,29 @@ interface OptionalContext {
 }
 
 /**
+ * The host session-projection seam.
+ *
+ * Hand-written rather than imported for the same reason as {@link PlanModeLike}:
+ * a type from `@deepseek-ai/dsh-session-projection` in the emitted
+ * `lib/index.d.ts` would make the package a hard requirement for consumers that
+ * only want `/loop`. The link is asserted at compile time in the test suite,
+ * which does have the real package.
+ *
+ * Only two members are declared because only two are used: the plugin registers
+ * one unit per session, and drops it when that session goes away. Nothing here
+ * writes projection state — the unit reads the plugin's own mirror.
+ */
+export interface SessionProjectionsLike {
+  /**
+   * Register one projection unit; the returned disposer unregisters it.
+   *
+   * @param definition - The unit definition.
+   * @returns The exact disposer for this registration.
+   */
+  register(definition: unknown): () => void
+}
+
+/**
  * Register the `/loop` command, the continuation tools, and the omission guard.
  *
  * @param ctx - Plugin context.
@@ -98,7 +148,6 @@ export function apply(ctx: Context, config: LoopConfig): void {
   const effective = resolveConfig(config)
   const env = process.env
   const scheduleService = optional<SchedulePort>(ctx, 'schedule')
-  const commands = optional<OptionalContext['commands']>(ctx, 'commands')
   const planMode = optional<PlanModeLike>(ctx, 'planMode')
   const timeContext = optional<{ readonly timeZone?: string }>(ctx, 'timeContext')
   const port = scheduleService === undefined ? undefined : schedulePortOf(scheduleService)
@@ -130,7 +179,99 @@ export function apply(ctx: Context, config: LoopConfig): void {
     timeZone: resolveTimeZone(timeContext),
     logger,
   })
-  const enqueue = createQueue()
+  // The projection mirror is written through by the serial queue below, so the
+  // client value can never disagree with the engine about what is armed.
+  const projections = new LoopProjectionStore()
+  const sessionProjections = optional<SessionProjectionsLike>(ctx, 'sessionProjections')
+
+  // Register the `loop` unit exactly ONCE, for the whole plugin.
+  //
+  // The registry keeps one registration per key — a second `register()` for the
+  // same key only bumps a refcount — so a definition cannot be private to a
+  // session. Registering one per session (with the id baked into each closure)
+  // collapsed to whichever registered first and served *its* mirror to every
+  // other session (T17). The unit binds the session in `init(header)` instead,
+  // which is also what makes a restored or long-idle session read its own mirror
+  // without waiting for its next turn end.
+  if (sessionProjections !== undefined) {
+    try {
+      sessionProjections.register(loopProjectionDefinitionFor(projections))
+    } catch (error) {
+      // A profile without the projection seam must not cost the user the tool
+      // surfaces this plugin exists for.
+      logger.warn(`loop: registering the loop session projection failed: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Every session this plugin has served, for the `schedule/changed` re-read.
+   *
+   * The projection registration is key-level now, so this set is plain
+   * bookkeeping: it is how a post-commit schedule write knows which sessions to
+   * re-read. Ids arrive through the serial queue below, the one funnel every
+   * command, tool call and guard pass already goes through.
+   */
+  const knownSessions = new Set<string>()
+
+  /**
+   * Re-read the authoritative loop and publish it to the projection.
+   *
+   * This runs inside the serial queue, after the task that changed something, so
+   * it observes the committed state rather than a guess. It never writes, never
+   * throws, and never reports: a projection is a view, and a view that cannot be
+   * refreshed must not turn a successful command into a failure.
+   */
+  const refreshProjection = async (sessionId: string): Promise<void> => {
+    knownSessions.add(sessionId)
+    try {
+      const reader = engineAgentOf(sessionId)
+      const listed = await engine.list(reader)
+      if (!listed.ok) {
+        // A state that cannot be read must not keep describing the loop it used
+        // to have: publishing the old `active: true` would leave the capsule
+        // offering buttons for a loop nobody can verify. The no-loop value is
+        // the honest degradation — nothing is claimed, and the capsule hides.
+        projections.publishNoLoop(sessionId)
+        logger.warn(`loop: the loop projection for ${sessionId} was cleared because the state read failed`)
+        return
+      }
+      const loop = listed.loops[0]
+      if (loop === undefined) {
+        projections.publishNoLoop(sessionId)
+        return
+      }
+      const receipts = await engine.receiptsOf(reader, loop.id)
+      projections.set(sessionId, loopFactsOf(loop, receipts.length))
+    } catch (error) {
+      logger.warn(`loop: refreshing the loop projection failed: ${messageOf(error)}`)
+      projections.publishNoLoop(sessionId)
+    }
+  }
+
+  // Every command, tool call and guard pass already funnels through this one
+  // queue, which is why it — and not each call site — is where the projection is
+  // refreshed.
+  const queue = createQueue()
+  const enqueue: Enqueue = <T,>(task: () => Promise<T>, sessionId?: string): Promise<T> =>
+    queue(async () => {
+      try {
+        return await task()
+      } finally {
+        if (sessionId !== undefined && sessionId.length > 0) await refreshProjection(sessionId)
+      }
+    })
+
+  /**
+   * Re-read one session's projection without doing anything else.
+   *
+   * The queue's `finally` is the refresh, so an empty task is not a trick: it is
+   * how the `schedule/changed` edge asks for exactly one re-read through the same
+   * serial boundary every other refresh goes through.
+   */
+  const refreshThroughQueue = (sessionId: string): void => {
+    void enqueue(async () => undefined, sessionId)
+  }
+
   const deps: RegistryDeps = {
     config: effective,
     engine,
@@ -144,23 +285,49 @@ export function apply(ctx: Context, config: LoopConfig): void {
     // deliberately exposes only the five lifecycle calls this engine needs, so a
     // catalogue lookup through it could never find `catalog`.
     listAllLoopRecords: catalogFn(scheduleService),
+    reportEvent: (event) => logger.info(formatLoopEvent(event)),
   }
 
-  if (commands !== undefined) {
+  // The tool surface comes first: it is the plugin's primary interface, and it
+  // must not sit behind — or depend on — the optional command registry below
+  // (T15: the command path ran first, so anything that went wrong or arrived
+  // late there took the four tools down with it).
+  //
+  // Each registration is wired through `ctx.effect` so its disposer belongs to
+  // this plugin's fiber. The tool registry scopes a registration to the service
+  // that owns it (`ToolRuntime.register` → `layers.effect(this.ctx, …)`), not to
+  // the caller, so a plugin unloaded and applied again in the same process would
+  // otherwise collide with its own still-registered names ("tool … is already
+  // registered"). A cold start registers on its first apply, which is precisely
+  // when that collision becomes reachable.
+  for (const definition of [
+    defineLoopStartTool(deps, enqueue),
+    defineLoopStatusTool(deps, enqueue),
+    defineLoopNextTool(deps, enqueue),
+    defineLoopStopTool(deps, enqueue),
+  ]) {
+    ctx.effect(() => ctx.tools.register(definition), `loop: ${definition.name}`)
+  }
+
+  // The command surface is optional (a profile may compose the tools without a
+  // command registry) but it is not one-shot: a registry that appears after this
+  // apply still gets `/loop` without a reload, exactly like `schedule` does.
+  // Composing inside `ctx.inject` is what gives it that lifetime.
+  ctx.inject(['commands'], (commandCtx: Context) => {
+    const registry = optional<OptionalContext['commands']>(commandCtx, 'commands')
+    if (registry === undefined) return
     const definition = buildLoopCommand({ registry: deps, enqueue, callerFrom: callerFromAgent })
-    commands.register({
+    registry.register({
       definitionId: CommandDefinitionId(definition.definitionId),
       name: definition.name,
       description: definition.description,
       input: definition.input,
       handler: definition.handler,
     })
-  } else {
+  })
+  if (optional<OptionalContext['commands']>(ctx, 'commands') === undefined) {
     logger.warn('loop: the command registry is not composed, so /loop has no human command surface here.')
   }
-
-  ctx.tools.register(defineLoopNextTool(deps, enqueue))
-  ctx.tools.register(defineLoopStopTool(deps, enqueue))
 
   // The omission guard: one serial listener on the turn-stop boundary for every
   // agent, including subagents (whose loops simply never exist).
@@ -171,15 +338,32 @@ export function apply(ctx: Context, config: LoopConfig): void {
       await enqueue(async () => {
         const report = await handleTurnStopping(deps, caller)
         if (report !== undefined) logger.info(`loop guard: ${report}`)
-      })
+      }, caller.sessionId)
     } catch (error) {
       logger.warn(`loop guard failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   })
+
+  // The schedule service announces every post-commit task write — a delivery
+  // included — with `schedule/changed`. Re-reading the projected sessions there
+  // is what keeps a scheduled round from showing up late: without it the capsule
+  // would keep the previous `nextAt`/`round` until the delivered session's turn
+  // happened to end, which for a loop that fires and is still being worked on is
+  // a whole round of staleness. The event carries no session identity, so every
+  // session this plugin has already served is re-read; the refresh rides the same
+  // serial queue and publishes nothing when a session's value did not move.
+  ctx.on('schedule/changed', () => {
+    for (const sessionId of knownSessions) refreshThroughQueue(sessionId)
+    return undefined
+  })
   ctx.on('agent/disposed', (payload: { agent: unknown }) => {
     const id = agentIdOf(payload.agent)
     if (id === undefined) return
-    void enqueue(async () => engine.forgetSession(id))
+    void enqueue(async () => {
+      engine.forgetSession(id)
+      knownSessions.delete(id)
+      projections.clear(id)
+    })
   })
 }
 
@@ -189,6 +373,43 @@ function resolveTimeZone(timeContext: { readonly timeZone?: string } | undefined
   if (typeof zone === 'string' && zone.trim().length > 0) return zone.trim()
   const resolved = Intl.DateTimeFormat().resolvedOptions().timeZone
   return typeof resolved === 'string' && resolved.length > 0 ? resolved : FALLBACK_TIME_ZONE
+}
+
+/** Flatten an unknown failure into one line. */
+function messageOf(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+/**
+ * Render one guard-rail event as a single log line.
+ *
+ * The `kind` discriminator comes first so a reader (or a grep) can tell *which*
+ * safety net fired without matching prose that two of them share.
+ *
+ * @param event - The event the registry reported.
+ * @returns One log line.
+ */
+export function formatLoopEvent(event: LoopEvent): string {
+  return `loop ${event.kind}: session ${event.sessionId} record ${event.id}: ${event.detail}`
+}
+
+/**
+ * Build the engine-facing agent view for one session id.
+ *
+ * Used by the projection refresh, which only knows the session identity and
+ * must never be able to deliver a round.
+ *
+ * @param sessionId - Session identity.
+ * @returns An agent view whose `send` is a no-op.
+ */
+function engineAgentOf(sessionId: string): {
+  readonly sessionId: string
+  readonly cwd: string
+  readonly isSubagent: boolean
+  readonly send: () => void
+} {
+  return { sessionId, cwd: process.cwd(), isSubagent: false, send: () => undefined }
 }
 
 /**
@@ -290,23 +511,12 @@ export function callerFromAgent(agent: unknown): Caller | undefined {
 /**
  * Build the model-visible message for one immediate round.
  *
- * The message goes through the host's own factory rather than a hand-rolled
- * object literal for two reasons the host cares about: `createUserMessage` mints
- * the `id` that the durable inbox dedupes and locates pending messages by (a
- * message without one makes the second injection throw
- * `message "undefined" is already pending`), and the `source` tag is a declared
- * member of `MessageSourceMap`, so it must be a real kind rather than borrowed
- * from another role.
- *
- * @param text - Round text.
- * @returns A frozen user-role message the agent's `followup` accepts.
+ * Re-exported from {@link module:cordis-plugin-loop/message} so the command, the
+ * `loop_start` tool and this module all build the identical message; it stays a
+ * named export of the package root because that is the public surface a consumer
+ * (and the test suite) already imports.
  */
-export function loopMessage(text: string): ReturnType<typeof createUserMessage> {
-  return createUserMessage({
-    content: [{ type: 'text', text }],
-    source: { kind: 'loop' },
-  })
-}
+export { loopMessage }
 
 /** Read the identity of an agent reference, for bookkeeping cleanup. */
 function agentIdOf(agent: unknown): string | undefined {

@@ -11,7 +11,7 @@
  */
 import { createHash } from 'node:crypto'
 import { fixedPrompt, selfPacedPrompt } from './prompt.ts'
-import type { LoopState, ScheduleRecordLike } from './types.ts'
+import type { LoopStartedBy, LoopState, ScheduleRecordLike } from './types.ts'
 
 /** Poison prefix identifying a record this plugin owns. */
 export const MARKER = 'DSH_LOOP'
@@ -69,6 +69,7 @@ export function buildPrompt(state: LoopState): LoopPrompt {
     v: HEADER_VERSION,
     owner: state.owner,
     mode: state.mode,
+    startedBy: state.startedBy,
     cadence: state.cadenceSeconds,
     cadenceLabel: state.cadenceLabel,
     fingerprint: state.fingerprint,
@@ -133,9 +134,14 @@ export function decodeLoopRecord(record: ScheduleRecordLike): LoopRecord | undef
   if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)) return undefined
   const taskFile = raw['taskFile']
   const task = raw['task']
+  // A record written before `startedBy` existed is a user loop: it was armed
+  // by a person through the only surface v0.1.x had, and decoding it as
+  // `agent` would silently subject it to a round cap nobody asked for.
+  const startedBy: LoopStartedBy = raw['startedBy'] === 'agent' ? 'agent' : 'user'
   const state: LoopState = {
     owner,
     mode,
+    startedBy,
     cadenceSeconds,
     cadenceLabel,
     fingerprint,

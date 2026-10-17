@@ -14,13 +14,13 @@ import { bootHost } from './harness.ts'
 test('walking skeleton: parse, immediate round, real cron record, real delivery', async () => {
   const host = await bootHost({ withCommands: undefined, sessionId: 'skeleton' } as never)
   try {
-    // 1. Register surface: the command and both tools are present.
+    // 1. Register surface: the command and all four tools are present.
     assert.deepEqual(
       host.commands.definitions.map((entry) => entry.name),
       ['loop'],
       'the /loop command must be registered',
     )
-    assert.deepEqual([...host.toolNames].sort(), ['loop_next', 'loop_stop'])
+    assert.deepEqual([...host.toolNames].sort(), ['loop_next', 'loop_start', 'loop_status', 'loop_stop'])
 
     // 2. Parse + immediate round + a real wall-clock cron record.
     const started = await host.commands.run('loop', host.agent, ' 10m check the build')
@@ -108,6 +108,38 @@ test('walking skeleton: parse, immediate round, real cron record, real delivery'
     assert.equal(payload[0]!.reminder_prompt, stored.prompt)
     assert.match(payload[0]!.schedule_id, /^schedule-/u)
     assert.match(payload[0]!.occurrence_at, /^\d{4}-\d{2}-\d{2}T/u)
+
+    // 6. The human status text and the model's status tool describe the same
+    //    record, against the REAL schedule service rather than the double. The
+    //    live record here is the 18h one the coarser-cadence step left behind.
+    const human = await host.commands.run('loop', host.agent, 'status')
+    assert.equal(human.kind, 'success', human.text)
+    assert.match(human.text ?? '', /- [0-9a-f-]+ {2}every day at midnight/u)
+    assert.match(human.text ?? '', /^ {2}next: /mu)
+    assert.match(human.text ?? '', /^ {2}started by: user$/mu)
+    assert.match(human.text ?? '', /^ {2}round limit: 24 \(reaching it stops the loop\)$/mu)
+    const tool = await host.rawToolRuntime().execute({
+      callId: 'call-loop-status' as never,
+      name: 'loop_status',
+      arguments: {},
+      agent: host.agent as never,
+      signal: new AbortController().signal,
+    })
+    const toolText = ((tool as { content?: { type: string; text?: string }[] }).content ?? [])
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text ?? '')
+      .join('')
+    console.log(`--- /loop status (real service) ---\n${human.text}\n--- loop_status tool ---\n${toolText}`)
+    assert.match(toolText, /active: true/u)
+    assert.match(toolText, /mode: fixed/u)
+    assert.match(toolText, /cadence: every day at midnight/u)
+    assert.match(toolText, /round: 1/u, 'round 1 is the round this session is on')
+    assert.match(toolText, /startedBy: user/u)
+    const live = (await (
+      host.ctx as unknown as { schedule: { catalog(): Promise<unknown[]> } }
+    ).schedule.catalog())[0] as { scheduledAt: string }
+    assert.ok(toolText.includes(live.scheduledAt), 'the tool must report the record’s own next occurrence')
+    assert.ok(human.text?.includes(live.scheduledAt) === true, 'and so must the human text')
   } finally {
     await host.dispose()
   }

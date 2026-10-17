@@ -1,5 +1,5 @@
 /**
- * Grammar tests: the six accepted call forms, the reserved words, and the
+ * Grammar tests: the eight accepted call forms, the reserved words, and the
  * interval vocabulary.
  * @module cordis-plugin-loop/test/grammar
  */
@@ -81,6 +81,8 @@ test('/loop <task> every <interval> keeps the whole task, spaces included', () =
 
 test('reserved words are reserved only on an exact whole-input match', () => {
   assert.deepEqual(parseLoopInput('status'), { kind: 'status' })
+  assert.deepEqual(parseLoopInput('next'), { kind: 'next' })
+  assert.deepEqual(parseLoopInput('  NEXT  '), { kind: 'next' })
   assert.deepEqual(parseLoopInput('stop'), { kind: 'stop', selector: undefined })
   assert.deepEqual(parseLoopInput('stop all'), { kind: 'stop', selector: 'all' })
   assert.deepEqual(parseLoopInput('stop 3'), { kind: 'stop', selector: '3' })
@@ -89,6 +91,10 @@ test('reserved words are reserved only on an exact whole-input match', () => {
   assert.equal(parseLoopInput('status report').kind, 'task')
   assert.equal(parseLoopInput('stop the world').kind, 'task')
   assert.equal(parseLoopInput('statuses').kind, 'task')
+  // The capsule's "next round" button is spelled `next`; a task that merely
+  // starts with it must stay a task.
+  assert.equal(parseLoopInput('next steps for the review').kind, 'task')
+  assert.equal(parseLoopInput('next 10m').kind, 'task')
 })
 
 test('an interval-form task keeps its exact text', () => {

@@ -1,19 +1,38 @@
 /**
- * The two continuation tools: `loop_next` and `loop_stop`.
+ * The four model-facing tools: `loop_start`, `loop_status`, `loop_next` and
+ * `loop_stop`.
  *
- * Both are session-scoped by construction: they resolve the calling agent from
- * the execution context, so a subagent (or any session without a loop) gets a
- * clear refusal instead of touching another session's reminder.
+ * All four are session-scoped by construction: they resolve the calling agent
+ * from the execution context, so a subagent (or any session without a loop)
+ * gets a clear refusal instead of touching another session's reminder.
+ *
+ * `loop_start` is deliberately *not* a second implementation of `/loop`: it
+ * resolves its structured arguments into the same start instruction and calls
+ * the same `startLoop` entry point the command uses, recording `agent` as the
+ * origin instead of `user`.
  * @module cordis-plugin-loop/tools
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { runLoopNext, runLoopStop, type Caller, type Enqueue, type RegistryDeps } from './registry.ts'
+import { loopMessage } from './message.ts'
+import {
+  loopStatus,
+  renderLoopStatus,
+  runLoopNext,
+  runLoopStart,
+  runLoopStop,
+  type Caller,
+  type Enqueue,
+  type RegistryDeps,
+  type StartToolRequest,
+} from './registry.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 /** The minimum of an execution context these tools read. */
 interface ToolAgentLike {
   readonly id: string
   readonly session?: { readonly header?: { readonly cwd?: string; readonly origin?: string } }
+  /** Host prototype method that delivers one message as the next turn. */
+  readonly followup?: (message: unknown) => void
 }
 
 /** Execution context shape handed to a tool body. */
@@ -24,6 +43,11 @@ interface ExecLike {
 /**
  * Resolve the calling session from one tool execution.
  *
+ * The caller can *deliver* a round, not merely describe one: `loop_start` runs
+ * its first round immediately, exactly like the command does, and that delivery
+ * goes through the host's own `followup` (bound to its receiver — detaching it
+ * makes `this` undefined in strict mode and the delivery throws).
+ *
  * @param exec - Tool execution context.
  * @returns The caller description, or `undefined` when no agent is attached.
  */
@@ -32,14 +56,16 @@ export function callerFrom(exec: unknown): Caller | undefined {
   if (agent === undefined || typeof agent.id !== 'string') return undefined
   const header = agent.session?.header
   const cwd = header?.cwd
+  const followup = typeof agent.followup === 'function' ? agent.followup.bind(agent) : undefined
   return {
     sessionId: agent.id,
     cwd: typeof cwd === 'string' && cwd.length > 0 ? cwd : process.cwd(),
     isSubagent: header?.origin === 'subagent',
-    send: (): void => {
-      // A tool call never needs to push an immediate round; the guard and the
-      // `/loop` command own every outbound message.
+    send: (text: string): void => {
+      if (followup === undefined) return
+      followup(loopMessage(text))
     },
+    agentRef: agent,
   }
 }
 
@@ -118,6 +144,142 @@ export function defineLoopNextTool(deps: RegistryDeps, enqueue: Enqueue): ToolDe
         throw new LoopToolError('loop_next needs a session context; no agent was attached to this call.')
       }
       return unwrap(await runLoopNext(deps, caller, args, enqueue))
+    },
+  })
+}
+
+/**
+ * Describe `loop_start` for the model.
+ *
+ * The description carries the whole decision: when to reach for it, what each
+ * argument means, and what comes back. It is deliberately explicit that this
+ * arms a real timer that will wake the session again, because the cost of an
+ * unnecessary loop is paid by the user, not by the caller.
+ */
+const LOOP_START_DESCRIPTION =
+  'Start a /loop in this session: run a task now, then keep running it on a cadence, waking this session again for every round. Use it when the user asks to keep watching, polling, retrying, or following something up, or when a long-running objective genuinely needs you to check back on your own — not for work you can finish in this turn, and not as a way to poll something you can await now. The loop is armed for this session only, and it is recorded as agent-started. cadence "fixed" fires on a wall-clock rhythm and needs seconds (a cron rule, rounded to whole minutes); cadence "self" waits a first safety interval and then you re-time every round with loop_next. Returns the loop id, the exact first wait, the expiry, and the round limit — reaching that limit stops the loop and says so. Its human counterpart is /loop.'
+
+/**
+ * Describe `loop_status` for the model.
+ *
+ * Read-only by construction, and the field list is stated so the model and the
+ * composer capsule provably read the same value.
+ */
+const LOOP_STATUS_DESCRIPTION =
+  'Read the authoritative loop state of this session without changing anything: active, mode (fixed or self), cadence (the human label, e.g. "every 10 minutes" or "self-paced"), nextAt (ISO instant of the next round, or null), round (which round this is — the same number the round_context line of the reminder in your context names, and 0 when no loop is armed), and startedBy (user when a person ran /loop, agent when you ran loop_start). Use it to answer a status question or before deciding whether a loop already exists; with active false there is no loop here. It reads the same value the composer capsule renders, so it never disagrees with /loop status.'
+
+/**
+ * Build `loop_start`.
+ *
+ * @param deps - Registry dependencies.
+ * @param enqueue - Serial queue.
+ * @returns The registry-ready tool definition.
+ */
+export function defineLoopStartTool(deps: RegistryDeps, enqueue: Enqueue): ToolDefinition {
+  return defineTool({
+    name: 'loop_start',
+    description: LOOP_START_DESCRIPTION,
+    parameters: {
+      task: {
+        type: 'string',
+        required: true,
+        description:
+          'The work each round must do, as one imperative line. It is stored as literal task text (never parsed as an interval), so a task that begins with something like "10m" stays a task.',
+      },
+      cadence: {
+        type: 'string',
+        enum: ['fixed', 'self'],
+        description:
+          'fixed = a wall-clock rhythm you must also give seconds for; self = the loop waits its first safety interval and you choose each following wait with loop_next. Defaults to self.',
+      },
+      seconds: {
+        type: 'integer',
+        description:
+          'Wall-clock interval in seconds; required with cadence "fixed" and refused with a cadence hint on a self-paced loop. Example: 600 for every ten minutes.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          text: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
+    },
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const caller = callerFrom(exec)
+      if (caller === undefined) {
+        throw new LoopToolError('loop_start needs a session context; no agent was attached to this call.')
+      }
+      const request: StartToolRequest = {
+        task: args.task,
+        ...(args.cadence === undefined ? {} : { cadence: args.cadence }),
+        ...(args.seconds === undefined ? {} : { seconds: args.seconds }),
+      }
+      return unwrap(await runLoopStart(deps, caller, request, enqueue))
+    },
+  })
+}
+
+/**
+ * Build `loop_status`.
+ *
+ * The tool returns the whole status value the projection serves, so a caller
+ * that reads `text` and a caller that reads `loop.startedBy` are looking at the
+ * same read.
+ *
+ * @param deps - Registry dependencies.
+ * @param enqueue - Serial queue.
+ * @returns The registry-ready tool definition.
+ */
+export function defineLoopStatusTool(deps: RegistryDeps, enqueue: Enqueue): ToolDefinition {
+  return defineTool({
+    name: 'loop_status',
+    description: LOOP_STATUS_DESCRIPTION,
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          text: { type: 'string', required: true },
+          available: { type: 'boolean' },
+          active: { type: 'boolean' },
+          mode: { type: 'string' },
+          cadence: { type: 'string' },
+          nextAt: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          round: { type: 'integer' },
+          startedBy: { type: 'string' },
+        },
+      },
+      // The canonical `text` carries the identical field list in one block, so a
+      // client that only forwards text loses no information.
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) {
+      const caller = callerFrom(exec)
+      if (caller === undefined) {
+        throw new LoopToolError('loop_status needs a session context; no agent was attached to this call.')
+      }
+      const status = await enqueue(() => loopStatus(deps, caller))
+      return {
+        text: renderLoopStatus(status),
+        available: status.available,
+        active: status.loop.active,
+        mode: status.loop.mode,
+        cadence: status.loop.cadence,
+        // Always carried, `null` included: the description promises "or null"
+        // and the rendered text always prints it, so omitting the key here made
+        // the structured face disagree with both (T5-F2).
+        nextAt: status.loop.nextAt,
+        round: status.loop.round,
+        startedBy: status.loop.startedBy,
+      }
     },
   })
 }

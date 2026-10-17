@@ -18,14 +18,29 @@ import {
   normalizeFixed,
 } from './cadence.ts'
 import { buildPrompt, ownerOf, selectLoopRecords, shortId, TASK_TITLE, type LoopRecord } from './state.ts'
+import { roundsStarted } from './loop-projection.ts'
 import { firstRoundPrompt } from './prompt.ts'
 import type { LoopConfig } from './config.ts'
 import type {
   DeliveryReceiptLike,
+  DeliveryTally,
+  LoopStartedBy,
   LoopState,
   SchedulePort,
   ScheduleRecordLike,
 } from './types.ts'
+
+/** Largest page of delivery receipts the live service will return in one read. */
+export const RECEIPT_PAGE = 100
+
+/**
+ * How many pages one round count will walk before it calls itself truncated.
+ *
+ * 100 pages is 10000 receipts, far beyond the service's own retention cap
+ * (200 records by default), so this is a liveness guard against a pathological
+ * or lying backend rather than a working limit.
+ */
+export const MAX_RECEIPT_PAGES = 100
 
 /** Model-visible text the engine hands to the session. */
 export interface LoopMessage {
@@ -74,6 +89,14 @@ export interface EngineResult {
 export interface StartRequest {
   /** `fixed` drives a cron rule; `self` arms the first safety check. */
   readonly mode: 'fixed' | 'self'
+  /**
+   * Who asked for the loop.
+   *
+   * Every command invocation is a person; every `loop_start` call is the model.
+   * The value is durable state, not a parameter the caller may waive, because
+   * the round cap and the projection's `startedBy` both read it back later.
+   */
+  readonly startedBy: LoopStartedBy
   /** Requested interval in seconds, when the caller supplied one. */
   readonly requestedSeconds?: number
   /** Exact task text, when the loop carries one inline. */
@@ -165,6 +188,11 @@ export class LoopEngine {
     const now = this.clock()
     let cadenceSeconds = 0
     let cadenceLabel = 'self-paced'
+    // The identity deliberately excludes the origin: `startedBy` was added after
+    // v0.1.1 shipped, and folding it in would re-draw the jitter phase (and so
+    // re-order the cron expression) of every loop a user restarts the same way.
+    // Which surface armed a loop is disclosed in the title and the confirmation
+    // text instead.
     let fingerprint = loopFingerprint(agent.sessionId, 0, identity)
     let offsetMinutes = 0
     let expression: string | undefined
@@ -189,6 +217,7 @@ export class LoopEngine {
     const state: LoopState = {
       owner: ownerOf(agent.sessionId),
       mode: request.mode,
+      startedBy: request.startedBy,
       cadenceSeconds,
       cadenceLabel,
       fingerprint,
@@ -292,6 +321,9 @@ export class LoopEngine {
     )
     lines.push(`Expires: ${new Date(state.expiresAt).toISOString()} (${this.deps.config.lifetimeDays} days)`)
     lines.push(
+      `Started by: ${state.startedBy} · round limit: ${this.deps.config.maxRounds} (reaching it stops the loop and says so)`,
+    )
+    lines.push(
       `Task: ${request.taskFile === undefined ? `${taskCodePoints} code points, inline` : `${request.taskFile} (file budget: bytes)`}`,
     )
     return { ok: true, text: lines.join('\n') }
@@ -335,17 +367,27 @@ export class LoopEngine {
     }
     const lines = ['Active loops in this session:', '']
     for (const loop of loops) {
-      const receipts = await this.receiptsOf(agent, loop.id)
+      // The panel prints the same two numbers the projection serves: the
+      // delivered count across every history page, and the round it makes this
+      // loop's current one. A one-page read here would disagree with the guard
+      // that stops the loop and with the capsule above the composer.
+      const tally = await this.countDeliveries(agent, loop.id)
       const cadence = loop.state.mode === 'self' ? 'self-paced' : loop.state.cadenceLabel
       lines.push(`- ${shortId(loop.id)}  ${cadence}`)
       lines.push(`  next: ${loop.record.scheduledAt}`)
       lines.push(`  expires: ${new Date(loop.state.expiresAt).toISOString()}`)
+      lines.push(`  started by: ${loop.state.startedBy}`)
+      lines.push(`  round: ${roundsStarted(loop.state.iteration, tally.count)}`)
       lines.push(
-        `  delivered so far: ${receipts.length} · record iteration ${loop.state.iteration} · quiet streak ${loop.state.quietStreak} · omissions ${loop.state.omissions}`,
+        `  delivered so far: ${tally.count}${tally.truncated ? '+' : ''} · record iteration ${loop.state.iteration} · quiet streak ${loop.state.quietStreak} · omissions ${loop.state.omissions}`,
       )
+      lines.push(`  round limit: ${this.deps.config.maxRounds} (reaching it stops the loop)`)
       lines.push(
         `  task: ${loop.state.taskFile ?? `${codePointLength(loop.state.task ?? '')} code points inline`}`,
       )
+      if (tally.truncated) {
+        lines.push('  note: the delivery history was longer than one walk reads, so the count is a lower bound.')
+      }
     }
     return { ok: true, text: lines.join('\n') }
   }
@@ -386,18 +428,73 @@ export class LoopEngine {
    *
    * @param agent - Calling agent.
    * @param id - Record id.
+   * @param limit - Page size for the first read; the live service caps it at 100.
    * @returns The receipts, or an empty list when the record is gone.
    */
-  async receiptsOf(agent: LoopAgent, id: string): Promise<readonly DeliveryReceiptLike[]> {
+  async receiptsOf(agent: LoopAgent, id: string, limit = RECEIPT_PAGE): Promise<readonly DeliveryReceiptLike[]> {
     const schedule = this.deps.schedule
     if (schedule === undefined) return Object.freeze([])
     try {
-      const page = await schedule.history({ sessionId: agent.sessionId, id, limit: 100 })
+      const page = await schedule.history({ sessionId: agent.sessionId, id, limit })
       if ('records' in page) return page.records
     } catch {
       // A history read is diagnostic only; a failure must not break the caller.
     }
     return Object.freeze([])
+  }
+
+  /**
+   * Count how many rounds one record's retained history proves were delivered.
+   *
+   * The service returns one page of at most {@link RECEIPT_PAGE} receipts and
+   * publishes `nextBefore` only while older ones remain, so a single read can
+   * never answer "how many rounds have there been" for a loop that ran past one
+   * page. That mattered: the round cap compared a one-page count against
+   * `config.maxRounds`, which the schema allows up to 100000, so any cap above
+   * one page was unreachable in silence.
+   *
+   * The walk stops as soon as `atLeast` is reached, which is what the cap check
+   * needs, and it stops after {@link MAX_RECEIPT_PAGES} pages no matter what, so
+   * a pathological history cannot stall a turn teardown. A walk that hits that
+   * ceiling reports `truncated` rather than a number it did not establish.
+   *
+   * @param agent - Calling agent.
+   * @param id - Record id.
+   * @param atLeast - Stop once this many receipts were seen.
+   * @returns The tally, with `truncated` set when older pages were left unread.
+   */
+  async countDeliveries(agent: LoopAgent, id: string, atLeast = Number.MAX_SAFE_INTEGER): Promise<DeliveryTally> {
+    const schedule = this.deps.schedule
+    if (schedule === undefined) return { count: 0, truncated: false, pruned: false }
+    let before: string | undefined
+    let count = 0
+    let truncated = false
+    let pruned = false
+    for (let page = 0; page < MAX_RECEIPT_PAGES; page += 1) {
+      let read: Awaited<ReturnType<SchedulePort['history']>>
+      try {
+        read = await schedule.history({
+          sessionId: agent.sessionId,
+          id,
+          limit: RECEIPT_PAGE,
+          ...(before === undefined ? {} : { before }),
+        })
+      } catch (error) {
+        // A history read is diagnostic; a failure must not break the caller.
+        this.deps.logger.warn(`loop: counting the rounds of ${id} failed: ${messageOf(error)}`)
+        return { count, truncated: true, pruned }
+      }
+      if (!('records' in read)) return { count, truncated: false, pruned }
+      pruned = pruned || read.earlierRecordsPruned === true
+      count += read.records.length
+      if (count >= atLeast) return { count, truncated: false, pruned }
+      if (read.records.length < RECEIPT_PAGE) return { count, truncated: false, pruned }
+      const cursor = read.nextBefore ?? read.records.at(-1)?.messageId
+      if (cursor === undefined || cursor === '') return { count, truncated: false, pruned }
+      before = cursor
+    }
+    truncated = true
+    return { count, truncated, pruned }
   }
 
   /**
@@ -584,12 +681,16 @@ export class LoopEngine {
  * Build the schedule task title: the fixed prefix plus a task excerpt, so a
  * user reading the schedule list can tell two loops apart.
  *
+ * A loop the model armed on its own instinct carries `[agent]` so a person
+ * scanning the schedule list can tell at a glance which loops they asked for.
+ *
  * @param state - Loop state of the record being created.
  * @returns A trimmed title of at most {@link TITLE_LIMIT} characters.
  */
 export function buildTitle(state: LoopState): string {
   const excerpt = titleExcerpt(state)
-  const title = excerpt.length === 0 ? TASK_TITLE : `${TASK_TITLE}: ${excerpt}`
+  const origin = state.startedBy === 'agent' ? '[agent] ' : ''
+  const title = excerpt.length === 0 ? `${origin}${TASK_TITLE}` : `${origin}${TASK_TITLE}: ${excerpt}`
   return title.length <= TITLE_LIMIT ? title : `${title.slice(0, TITLE_LIMIT - 3)}...`
 }
 

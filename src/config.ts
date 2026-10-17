@@ -10,6 +10,16 @@ export interface LoopConfig {
   enabled: boolean
   /** How long one loop lives, in days; the last round runs before the record is deleted. */
   lifetimeDays: number
+  /**
+   * Hard cap on the rounds one loop may start.
+   *
+   * It bounds a loop the model armed on its own initiative — and, like every
+   * other guard here, it bounds a person's loop too, because "unbounded" is not
+   * a useful default for something that wakes a session by itself. Reaching the
+   * cap stops the loop with its own reason, distinct from the 7-day lifetime and
+   * from the two-omissions stop.
+   */
+  maxRounds: number
   /** First wait of a self-paced loop, in seconds. */
   safetyCheckSeconds: number
   /** Guard-rail wait armed after the first omitted continuation, in seconds. */
@@ -26,6 +36,7 @@ export interface LoopConfig {
 export const DEFAULT_CONFIG: Readonly<LoopConfig> = Object.freeze({
   enabled: true,
   lifetimeDays: 7,
+  maxRounds: 24,
   safetyCheckSeconds: 1800,
   omissionCheckSeconds: 1200,
   maxNextSeconds: 3600,
@@ -40,6 +51,7 @@ export const DEFAULT_CONFIG: Readonly<LoopConfig> = Object.freeze({
 export const Config = z.object({
   enabled: z.boolean().default(DEFAULT_CONFIG.enabled),
   lifetimeDays: z.number().step(1).min(1).max(3650).default(DEFAULT_CONFIG.lifetimeDays),
+  maxRounds: z.number().step(1).min(1).max(100_000).default(DEFAULT_CONFIG.maxRounds),
   safetyCheckSeconds: z.number().step(1).min(60).max(3600).default(DEFAULT_CONFIG.safetyCheckSeconds),
   omissionCheckSeconds: z.number().step(1).min(60).max(3600).default(DEFAULT_CONFIG.omissionCheckSeconds),
   maxNextSeconds: z.number().step(1).min(60).max(3600).default(DEFAULT_CONFIG.maxNextSeconds),
@@ -81,6 +93,7 @@ export function resolveConfig(raw: unknown): LoopConfig {
   const config: LoopConfig = {
     enabled: boolean('enabled'),
     lifetimeDays: integer('lifetimeDays', 1, 3650),
+    maxRounds: integer('maxRounds', 1, 100_000),
     safetyCheckSeconds: integer('safetyCheckSeconds', 60, 3600),
     omissionCheckSeconds: integer('omissionCheckSeconds', 60, 3600),
     maxNextSeconds: integer('maxNextSeconds', 60, 3600),

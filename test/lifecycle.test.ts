@@ -1,16 +1,30 @@
 /**
- * Loop lifecycle: self-paced continuation, the omission safety net, expiry, and
- * the containment that keeps the guard out of turn teardown.
+ * Loop lifecycle: self-paced continuation, the omission safety net, the round
+ * cap, expiry, and the containment that keeps the guard out of turn teardown.
  * @module cordis-plugin-loop/test/lifecycle
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { LoopEngine } from '../src/engine.ts'
-import { createQueue, handleTurnStopping, runLoopCommand, runLoopNext, runLoopStop, type Caller, type RegistryDeps } from '../src/registry.ts'
+import { createQueue, handleTurnStopping, runLoopCommand, runLoopNext, runLoopStart, runLoopStop, type Caller, type LoopEvent, type RegistryDeps } from '../src/registry.ts'
 import { decodeLoopRecord } from '../src/state.ts'
 import { DEFAULT_CONFIG, type LoopConfig } from '../src/config.ts'
 import { FakeSchedule } from './fake-schedule.ts'
 import { bootHost } from './harness.ts'
+
+/**
+ * Run one `loop_start` tool call through the registry exactly as the tool does.
+ *
+ * @param bench - The rig to run against.
+ * @param request - Validated tool arguments.
+ * @returns The result to render.
+ */
+function runStartTool(
+  bench: Rig,
+  request: { task: string; cadence?: 'fixed' | 'self'; seconds?: number },
+): Promise<{ ok: boolean; text: string }> {
+  return runLoopStart(bench.deps, bench.caller, request, bench.enqueue)
+}
 
 /** One assembled lifecycle surface with a movable clock. */
 interface Rig {
@@ -28,8 +42,12 @@ interface Rig {
   readonly sent: string[]
   /** Everything the plugin logged. */
   readonly logs: string[]
+  /** Every guard-rail event the registry reported. */
+  readonly events: LoopEvent[]
   /** The caller these surfaces run as. */
   readonly caller: Caller
+  /** The kill switch this rig's dependencies consult, so a test can flip it. */
+  readonly killSwitch: { on: boolean }
 }
 
 /** Build one rig. */
@@ -40,6 +58,8 @@ function rig(config: Partial<LoopConfig> = {}): Rig {
   schedule.external = () => clock.now
   const sent: string[] = []
   const logs: string[] = []
+  const events: LoopEvent[] = []
+  const killSwitch = { on: false }
   const effective: LoopConfig = { ...DEFAULT_CONFIG, ...config }
   const engine = new LoopEngine({
     config: effective,
@@ -48,7 +68,16 @@ function rig(config: Partial<LoopConfig> = {}): Rig {
     logger: { warn: (message) => logs.push(message), info: (message) => logs.push(message) },
     now: () => clock.now,
   })
-  const deps: RegistryDeps = { config: effective, engine, env: {}, killSwitch: () => false }
+  const deps: RegistryDeps = {
+    config: effective,
+    engine,
+    env: {},
+    killSwitch: () => killSwitch.on,
+    reportEvent: (event) => {
+      events.push(event)
+      logs.push(`${event.kind}: ${event.detail}`)
+    },
+  }
   return {
     deps,
     enqueue: createQueue(),
@@ -57,6 +86,8 @@ function rig(config: Partial<LoopConfig> = {}): Rig {
     clock,
     sent,
     logs,
+    events,
+    killSwitch,
     caller: {
       sessionId: 'session-a',
       cwd: process.cwd(),
@@ -193,12 +224,53 @@ test('a continued round is not an omission, and the guard is not re-armed', asyn
   assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.omissions, 0)
 })
 
-test('a turn-stopping pass with no new delivery does nothing at all', async () => {
+test('a turn-stopping pass with no new delivery leaves a loop that still has budget alone', async () => {
+  // The pass below *does* evaluate the round cap; what this case pins is the
+  // under-budget outcome, so the default 24 rounds and no button presses must
+  // decide nothing and write nothing.
   const bench = rig()
   await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
   assert.equal(await handleTurnStopping(bench.deps, bench.caller), undefined)
   assert.equal(bench.schedule.updateCalls, 0, 'no write happens without a new delivery')
   assert.equal(bench.schedule.deleteCalls, 0)
+  assert.deepEqual(bench.events, [], 'and no guard rail is reported')
+})
+
+test('the round limit stops a button-only loop before any receipt exists (V1)', async () => {
+  // A capsule press advances the durable counter but leaves no scheduler receipt,
+  // so the budget has to be evaluated *before* the no-receipt early return:
+  // gating the cap on a receipt let `maxRounds` be walked past by hand (V1).
+  const bench = rig({ maxRounds: 2 })
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  assert.equal(bench.sent.length, 1, 'the start delivers round 1')
+  for (const expected of [1, 2]) {
+    const pressed = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+    assert.equal(pressed.ok, true, pressed.text)
+    assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.iteration, expected, 'each press is durable')
+  }
+  assert.equal(bench.schedule.size, 1, 'the loop is still armed before the guard pass')
+
+  const report = await handleTurnStopping(bench.deps, bench.caller)
+  assert.equal(report, 'stopped after reaching its round limit of 2 (1)')
+  assert.equal(bench.schedule.size, 0, 'rows 1 -> 0: the record is deleted')
+  assert.deepEqual(bench.events.map((event) => event.kind), ['round-limit'])
+  assert.equal(bench.events[0]?.detail, 'round limit reached after 2 delivered round(s) of 2')
+  const notice = bench.sent.at(-1)!
+  assert.match(notice, /reached its round limit of 2 round\(s\), so it has been stopped and removed \(1\)/u)
+  assert.match(notice, /it is a separate limit from the 7-day lifetime and from the two-omission stop/u)
+  assert.match(notice, /Raise config.maxRounds or start a new loop/u)
+})
+
+test('the same button-only presses do not stop a loop that still has budget', async () => {
+  const bench = rig({ maxRounds: 24 })
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  for (let press = 0; press < 2; press += 1) {
+    const pressed = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+    assert.equal(pressed.ok, true, pressed.text)
+  }
+  assert.equal(await handleTurnStopping(bench.deps, bench.caller), undefined)
+  assert.equal(bench.schedule.size, 1, 'rows stay 1: no false stop')
+  assert.deepEqual(bench.events, [], 'and no guard rail is reported')
 })
 
 test('a delivery after the end of life runs one last round and then removes the loop', async () => {
@@ -295,4 +367,303 @@ test('the composed plugin: a real turn-stopping dispatch drives the guard throug
   } finally {
     await host.dispose()
   }
+})
+
+
+test('a loop stops when it reaches its round limit, and says which guard rail fired', async () => {
+  const bench = rig({ maxRounds: 2 })
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  const id = bench.schedule.all()[0]!.id
+
+  // Round 1 was delivered by the start; the first turn end is the first round
+  // the model finished, and the budget is not spent yet.
+  bench.clock.now += 10 * 60 * 1000
+  bench.schedule.deliver(id)
+  assert.equal(await handleTurnStopping(bench.deps, bench.caller), 'armed a 20-minute omission guard for 1')
+  assert.equal(bench.schedule.size, 1, 'one round of two must not stop the loop')
+
+  // Round 2 lands, and the limit is reached: the loop stops for THAT reason,
+  // not for the omission the same turn also contains.
+  bench.clock.now += 20 * 60 * 1000
+  bench.schedule.deliver(id)
+  const report = await handleTurnStopping(bench.deps, bench.caller)
+  assert.equal(report, 'stopped after reaching its round limit of 2 (1)')
+  assert.equal(bench.schedule.size, 0, 'the loop must be gone')
+  const notice = bench.sent.at(-1)!
+  assert.match(notice, /reached its round limit of 2 round\(s\)/u)
+  assert.match(notice, /separate limit from the 7-day lifetime and from the two-omission stop/u)
+  assert.match(notice, /Raise config.maxRounds/u)
+  const kinds = bench.events.map((event) => event.kind)
+  assert.deepEqual(kinds, ['round-limit'], `expected only the round-limit rail, saw: ${JSON.stringify(bench.events)}`)
+  assert.match(bench.logs.at(-1)!, /^round-limit: round limit reached after 2 delivered round\(s\) of 2/u)
+})
+
+test('the round limit applies to a self-paced loop the model armed itself', async () => {
+  const bench = rig({ maxRounds: 3 })
+  const started = await runStartTool(bench, { task: 'watch the queue' })
+  assert.equal(started.ok, true, started.text)
+  const id = bench.schedule.all()[0]!.id
+  assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.startedBy, 'agent')
+  // Round 1 is delivered by the start; the model continues twice, which spends
+  // rounds 2 and 3 and must end the loop.
+  for (let round = 2; round <= 3; round += 1) {
+    bench.clock.now += 5 * 60 * 1000
+    bench.schedule.deliver(id)
+    const continued = await runLoopNext(bench.deps, bench.caller, { seconds: 300, reason: `round ${round}` }, bench.enqueue)
+    assert.equal(continued.ok, true, continued.text)
+  }
+  bench.clock.now += 5 * 60 * 1000
+  bench.schedule.deliver(id)
+  const report = await handleTurnStopping(bench.deps, bench.caller)
+  assert.equal(report, 'stopped after reaching its round limit of 3 (1)')
+  assert.equal(bench.schedule.size, 0)
+  assert.deepEqual(bench.events.map((event) => event.kind), ['round-limit'])
+})
+
+test('the two guard rails cannot mask each other', async () => {
+  // The lifetime wins when it expires first, even with budget left...
+  const early = rig({ maxRounds: 24, lifetimeDays: 1 })
+  await runLoopCommand(early.deps, early.caller, '10m check the build', early.enqueue)
+  early.clock.now += 86_400_000 + 1000
+  assert.equal(await handleTurnStopping(early.deps, early.caller), 'expired 1')
+  assert.deepEqual(early.events.map((event) => event.kind), ['expiry'])
+  assert.match(early.sent.at(-1)!, /reached its end of life/u)
+  assert.doesNotMatch(early.sent.at(-1)!, /round limit/u)
+
+  // ...and the round limit wins when it is reached first, even with a week left.
+  const late = rig({ maxRounds: 1, lifetimeDays: 7 })
+  await runLoopCommand(late.deps, late.caller, '10m check the build', late.enqueue)
+  const id = late.schedule.all()[0]!.id
+  late.clock.now += 10 * 60 * 1000
+  late.schedule.deliver(id)
+  assert.equal(await handleTurnStopping(late.deps, late.caller), 'stopped after reaching its round limit of 1 (1)')
+  assert.deepEqual(late.events.map((event) => event.kind), ['round-limit'])
+  assert.match(late.sent.at(-1)!, /reached its round limit/u)
+  assert.doesNotMatch(late.sent.at(-1)!, /end of life/u)
+  assert.equal(late.clock.now < late.engine.now() + 7 * 86_400_000, true, 'the loop had days of lifetime left')
+})
+
+test('an omission guard is still reported as an omission when no limit is reached', async () => {
+  const bench = rig({ maxRounds: 24 })
+  await runLoopCommand(bench.deps, bench.caller, 'watch the queue', bench.enqueue)
+  const id = bench.schedule.all()[0]!.id
+  bench.clock.now += 30 * 60 * 1000
+  bench.schedule.deliver(id)
+  assert.equal(await handleTurnStopping(bench.deps, bench.caller), 'armed a 20-minute omission guard for 1')
+  bench.clock.now += 20 * 60 * 1000
+  bench.schedule.deliver(id)
+  assert.equal(await handleTurnStopping(bench.deps, bench.caller), 'stopped after a second omission (1)')
+  assert.deepEqual(bench.events.map((event) => event.kind), ['omissions'])
+  assert.match(bench.logs.at(-1)!, /^omissions: stopped after a second consecutive omitted continuation/u)
+})
+
+test('a round budget deeper than one history page is still counted exactly', async () => {
+  // Regression: the cap compared a single `history({limit:100})` page against
+  // `config.maxRounds`, so any cap above 100 was unreachable in silence.
+  const bench = rig({ maxRounds: 150 })
+  await runLoopCommand(bench.deps, bench.caller, 'watch the queue', bench.enqueue)
+  const id = bench.schedule.all()[0]!.id
+  for (let round = 0; round < 150; round += 1) bench.schedule.deliver(id)
+  assert.equal(bench.schedule.size, 1, 'the loop is still armed before the guard')
+  const report = await handleTurnStopping(bench.deps, bench.caller)
+  assert.equal(report, 'stopped after reaching its round limit of 150 (1)')
+  assert.equal(bench.schedule.size, 0)
+  const limitLog = bench.logs.find((line) => line.includes('round-limit'))
+  assert.match(limitLog ?? '', /round limit reached after 150 delivered round\(s\) of 150/u)
+  assert.deepEqual(bench.events.map((event) => event.kind), ['round-limit'])
+})
+
+test('a round the capsule button began spends the same budget as a delivered one', async () => {
+  // Regression: `/loop next` advanced the durable counter but the cap counted
+  // only scheduler receipts, so five presses at maxRounds=2 left the loop live.
+  const bench = rig({ maxRounds: 2 })
+  await runLoopCommand(bench.deps, bench.caller, 'watch the queue', bench.enqueue)
+  assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.iteration, 0)
+  for (const expected of [1, 2]) {
+    const pressed = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+    assert.equal(pressed.ok, true, pressed.text)
+    assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.iteration, expected)
+  }
+  assert.equal(bench.schedule.size, 1, 'no receipt exists yet, so the guard has not run')
+  // The next turn end is where the spent budget is enforced.
+  bench.schedule.deliver(bench.schedule.all()[0]!.id)
+  const report = await handleTurnStopping(bench.deps, bench.caller)
+  assert.equal(report, 'stopped after reaching its round limit of 2 (1)')
+  assert.equal(bench.schedule.size, 0)
+  assert.deepEqual(bench.events.map((event) => event.kind), ['round-limit'])
+  assert.ok(
+    !bench.logs.some((line) => line.includes('second consecutive omitted continuation')),
+    'the cap must be reported as the cap, not as an omission',
+  )
+})
+
+test('`/loop next` runs the next round now, for a loop the user started', async () => {
+  const bench = rig()
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  assert.equal(bench.sent.length, 1, 'round 1 ran at start time')
+  const id = bench.schedule.all()[0]!.id
+  bench.clock.now += 60_000
+  const beforePress = bench.schedule.all()[0]!
+  const receiptsBefore = (await bench.engine.countDeliveries({ sessionId: bench.caller.sessionId, cwd: process.cwd(), isSubagent: false, send: () => undefined }, id)).count
+
+  const result = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(result.ok, true, result.text)
+  assert.match(result.text, /Next round delivered now \(1\)/u)
+  assert.match(result.text, /the wall-clock cadence is untouched/u)
+  assert.match(result.text, /Round 2 of at most 24 started by: user · cadence every 10 minutes/u)
+  assert.equal(bench.sent.length, 2, 'the button delivers a round immediately')
+  assert.match(bench.sent[1]!, /The user pressed "next round" in the composer capsule/u)
+  assert.match(bench.sent[1]!, /is not a scheduled delivery/u)
+  assert.match(bench.sent[1]!, /round_context: '\{"loop":true,"round":2/u)
+  assert.match(bench.sent[1]!, /check the build/u)
+  assert.equal(bench.schedule.size, 1, 'the record is replaced in place, never duplicated')
+  assert.equal(bench.schedule.all()[0]!.id, id, 'and it keeps its id')
+  // The regression this locks: the button must not re-time a wall-clock rule.
+  const afterPress = bench.schedule.all()[0]!
+  assert.equal(afterPress.kind, 'cron', 'a fixed-cadence loop stays a cron rule through the press')
+  assert.equal(afterPress.expression, beforePress.expression, 'and its expression is unchanged')
+  assert.equal(afterPress.everySeconds, undefined, 'no fixed-rate interval may be introduced')
+  assert.equal(afterPress.scheduledAt, beforePress.scheduledAt, 'and its wall-clock target is untouched')
+  assert.equal(bench.schedule.updateCalls, 1, 'the press still updates the record once (the round counter)')
+  const after = await bench.engine.countDeliveries({ sessionId: bench.caller.sessionId, cwd: process.cwd(), isSubagent: false, send: () => undefined }, id)
+  assert.equal(after.count, receiptsBefore, 'the press fabricates no scheduler receipt')
+  const decoded = decodeLoopRecord(afterPress)
+  assert.ok(decoded !== undefined)
+  assert.equal(decoded.state.iteration, 1, 'the button counts as a round for the cap and the projection')
+  assert.equal(decoded.state.mode, 'fixed', 'the durable rhythm is unchanged')
+  assert.equal(decoded.state.cadenceSeconds, 600, 'and so is the durable cadence')
+  assert.equal(decoded.state.startedBy, 'user')
+})
+
+test('`/loop next` re-arms only a self-paced loop, and keeps its cadence text honest', async () => {
+  const bench = rig()
+  const started = await runStartTool(bench, { task: 'watch the queue' })
+  assert.equal(started.ok, true, started.text)
+  const id = bench.schedule.all()[0]!.id
+  const result = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(result.ok, true, result.text)
+  assert.match(result.text, /the following round is armed for 60s from now/u)
+  assert.match(result.text, /Round 2 of at most 24 started by: user · cadence self-paced/u)
+  assert.equal(bench.schedule.all()[0]!.everySeconds, 60, 'a self-paced loop is re-armed for the follow-up round')
+  assert.equal(bench.schedule.all()[0]!.id, id)
+})
+
+test('`/loop next` works on a fixed-cadence loop, where loop_next is refused', async () => {
+  const bench = rig()
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  const model = await runLoopNext(bench.deps, bench.caller, { seconds: 300, reason: 'x' }, bench.enqueue)
+  assert.equal(model.ok, false, 'the model cannot re-time a wall-clock loop')
+  assert.match(model.text, /fixed cadence/u)
+
+  const user = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(user.ok, true, user.text)
+  assert.equal(bench.sent.length, 2)
+})
+
+test('`/loop next` works on a loop the model armed, and `/loop stop` ends either one', async () => {
+  const bench = rig()
+  const started = await runStartTool(bench, { task: 'watch the queue' })
+  assert.equal(started.ok, true, started.text)
+  assert.equal(bench.sent.length, 1)
+
+  const advanced = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(advanced.ok, true, advanced.text)
+  assert.match(advanced.text, /started by: user/u, 'the button is a person acting, whatever armed the loop')
+  assert.equal(bench.sent.length, 2, 'the agent-armed loop runs its round immediately')
+  assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.startedBy, 'agent', 'the loop keeps its origin')
+
+  const stopped = await runLoopCommand(bench.deps, bench.caller, 'stop', bench.enqueue)
+  assert.equal(stopped.ok, true, stopped.text)
+  assert.match(stopped.text, /Stopped 1 loop\(s\): 1\./u)
+  assert.equal(bench.schedule.size, 0)
+})
+
+test('`/loop next` refuses clearly when there is nothing to advance', async () => {
+  const bench = rig()
+  const idle = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(idle.ok, false)
+  assert.match(idle.text, /no next round to run/u)
+  assert.equal(bench.sent.length, 0, 'a refusal must not wake the session')
+
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  bench.clock.now += 7 * 86_400_000 + 1000
+  const expired = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(expired.ok, false)
+  assert.match(expired.text, /reached its end of life/u)
+  assert.equal(bench.schedule.size, 0, 'an expired loop is removed, not advanced')
+})
+
+test('`/loop next` rolls the record back when the delivery fails', async () => {
+  const bench = rig()
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  const id = bench.schedule.all()[0]!.id
+  const failing: Caller = { ...bench.caller, send: () => { throw new Error('the inbox is closed') } }
+  const result = await runLoopCommand(bench.deps, failing, 'next', bench.enqueue)
+  assert.equal(result.ok, false)
+  assert.match(result.text, /could not be delivered, so the loop was stopped and removed: the inbox is closed/u)
+  assert.equal(bench.schedule.size, 0, 'a loop that cannot deliver must not be left armed')
+  assert.equal(bench.sent.length, 1, 'no round was reported as delivered')
+  void id
+})
+
+
+test('F5: `/loop next` is refused for a subagent caller, and delivers nothing', async () => {
+  // Regression: the `next` branch sat ahead of the subagent guard, so a child
+  // that reported its parent's session id could make that session run a round.
+  const bench = rig()
+  await runLoopCommand(bench.deps, bench.caller, 'watch the queue', bench.enqueue)
+  assert.equal(bench.sent.length, 1, 'round 1 ran at start time')
+  const id = bench.schedule.all()[0]!.id
+
+  const impostor: Caller = { ...bench.caller, isSubagent: true }
+  const refused = await runLoopCommand(bench.deps, impostor, 'next', bench.enqueue)
+  assert.equal(refused.ok, false, refused.text)
+  assert.match(refused.text, /subagent session cannot start or stop a loop/u)
+  assert.equal(bench.sent.length, 1, 'a refused press must not deliver a round')
+  assert.equal(bench.schedule.updateCalls, 0, 'and must not touch the record either')
+  assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.iteration, 0, 'no round was counted')
+  // A genuinely separate child session owns no loop at all.
+  const child: Caller = { ...bench.caller, isSubagent: true, sessionId: 'session-child' }
+  const idle = await runLoopCommand(bench.deps, child, 'next', bench.enqueue)
+  assert.equal(idle.ok, false)
+  assert.match(idle.text, /subagent session cannot start or stop a loop/u)
+  assert.equal(bench.schedule.size, 1, 'the parent loop is untouched')
+  // Reading stays available: `status` is above the guard on purpose.
+  const status = await runLoopCommand(bench.deps, impostor, 'status', bench.enqueue)
+  assert.equal(status.ok, true, status.text)
+  assert.equal(decodeLoopRecord(bench.schedule.peek(id)!)?.state.iteration, 0)
+})
+
+test('F8: the kill switch refuses `/loop next` and delivers nothing', async () => {
+  const bench = rig()
+  await runLoopCommand(bench.deps, bench.caller, 'watch the queue', bench.enqueue)
+  const id = bench.schedule.all()[0]!.id
+  const before = bench.sent.length
+  bench.killSwitch.on = true
+  const refused = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(refused.ok, false, refused.text)
+  assert.match(refused.text, /DSH_DISABLE_LOOP kill switch is set/u)
+  assert.equal(bench.sent.length, before, 'no round may be delivered while the switch is set')
+  assert.equal(bench.schedule.updateCalls, 0, 'and the record is not rewritten')
+  assert.equal(bench.schedule.size, 1, 'the existing loop is left for /loop stop, exactly like the start path')
+  assert.equal(decodeLoopRecord(bench.schedule.all()[0]!)?.state.iteration, 0)
+  bench.killSwitch.on = false
+  const allowed = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(allowed.ok, true, allowed.text)
+  assert.equal(bench.sent.length, before + 1)
+  void id
+})
+
+test('F6: a fixed-cadence `/loop next` names the real round limit and cadence', async () => {
+  const bench = rig({ maxRounds: 7 })
+  await runLoopCommand(bench.deps, bench.caller, '10m check the build', bench.enqueue)
+  const result = await runLoopCommand(bench.deps, bench.caller, 'next', bench.enqueue)
+  assert.equal(result.ok, true, result.text)
+  assert.match(result.text, /Round 2 of at most 7 started by: user · cadence every 10 minutes/u)
+  const delivered = bench.sent.at(-1)!
+  // The sentence must state the configured round limit, never the cadence label.
+  assert.match(delivered, /round limit 7/u)
+  assert.doesNotMatch(delivered, /of at most every/u)
+  assert.doesNotMatch(delivered, /at most every 10 minutes/u)
+  assert.match(delivered, /cadence every 10 minutes/u)
 })
