@@ -275,52 +275,120 @@
   }
 
   /**
-   * Capsule container style: the shell's own theme tokens, one row.
-   *
-   * Every `var()` below names a token the Web shell defines on `:root` (the
-   * `--dsw-*` set the theme package injects). None of them carries a hardcoded
-   * fallback: a made-up name with a fallback freezes the capsule at that
-   * fallback and it silently stops following the theme (T5-F1), so a wrong name
-   * must be impossible to write rather than merely cosmetic. Spacing is the one
-   * exception — the token set carries radius, font and alias tokens but no gap
-   * or padding scale, so both paddings are literal pixels.
+   * Visual language, copied value for value from the goal capsule's own
+   * stylesheet (`dsh-client-ui-goal/lib/client.js`, `GoalBar.module.css`):
+   * a 36px card with `--dsw-radius-md`, the elevation panel shadow (whose stroke
+   * colour is `--dsw-alias-border-l1`), the menu surface as its background, a
+   * tertiary glyph, a primary label, a dimmed ellipsised line and 28px round icon
+   * buttons with a hover fill. Hand-written `var()` fallbacks stay banned: a
+   * made-up name with a fallback freezes the property at that fallback and the
+   * capsule silently stops following the theme (T5-F1).
    */
-  const capsuleStyle = Object.freeze({
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    width: '100%',
+  const dockStyle = Object.freeze({
     boxSizing: 'border-box',
-    padding: '4px 8px',
-    border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: 'var(--dsw-radius-md)',
-    fontSize: 'var(--dsw-font-xxs-12-font-size)',
-    lineHeight: 'var(--dsw-font-xxs-12-line-height)',
-    color: 'var(--dsw-alias-label-secondary)',
+    // The goal bar's own alignment recipe: the composer layout publishes side
+    // clearance and dock inset, and the strip narrows itself by both so the card
+    // lines up with the composer card instead of spanning the whole pane.
+    width:
+      'calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset))',
+    margin: '0 auto',
+    display: 'flex',
+    justifyContent: 'center',
   })
 
-  /** Small control style for the two verbs; the host supplies the font. */
-  const buttonStyle = Object.freeze({
-    font: 'inherit',
-    color: 'inherit',
+  /** The card itself. */
+  const barStyle = Object.freeze({
+    '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
+    boxSizing: 'border-box',
+    width: '100%',
+    maxWidth: 'calc(var(--dsh-composer-card-max-width) - 4 * var(--dsh-composer-dock-inset))',
+    height: '36px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    margin: '0 auto',
+    padding: '4px 5px 4px 12px',
+    border: '0',
+    borderRadius: 'var(--dsw-radius-md)',
+    background: 'var(--dsw-specific-menu)',
+    backdropFilter: 'var(--dsw-menu-backdrop-filter)',
+    boxShadow: 'var(--dsw-elevation-panel)',
+    position: 'relative',
+  })
+
+  /** Leading glyph: the goal bar's own tertiary tint, sized with its label. */
+  const glyphStyle = Object.freeze({
+    color: 'var(--dsw-alias-label-tertiary)',
+    flex: 'none',
+    display: 'inline-flex',
+    fontSize: '14px',
+    lineHeight: '1',
+  })
+
+  /** The label slot (goal uses it for the phase). */
+  const labelStyle = Object.freeze({
+    color: 'var(--dsw-alias-label-primary)',
+    flex: 'none',
+    fontSize: '13px',
+    fontWeight: 500,
+    lineHeight: '24px',
+  })
+
+  /** The flexing reading line: one ellipsised row, never a second line. */
+  const readingStyle = Object.freeze({
+    minWidth: 0,
+    flex: '1 1 auto',
+    color: 'var(--dsw-alias-label-primary-dimmed)',
+    fontSize: '13px',
+    lineHeight: '20px',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+  })
+
+  /** A failed verb reads in the goal bar's own error styling. */
+  const errorStyle = Object.freeze({
+    minWidth: 0,
+    flex: '1 1 auto',
+    color: 'var(--dsw-alias-state-error-primary)',
+    fontSize: '12px',
+    lineHeight: '20px',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+  })
+
+  /** Right-hand control cluster. */
+  const actionsStyle = Object.freeze({
+    flex: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  })
+
+  /** Round 28px icon button, the goal bar's own control. */
+  const iconButtonStyle = Object.freeze({
+    width: '28px',
+    height: '28px',
+    display: 'inline-flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 0,
+    border: '0',
+    borderRadius: '999px',
     background: 'transparent',
-    border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: 'var(--dsw-radius-sm)',
-    padding: '1px 6px',
+    color: 'var(--dsw-alias-label-tertiary)',
     cursor: 'pointer',
   })
 
-  /** Dim separator between two readings. */
-  const dotStyle = Object.freeze({ opacity: 0.65 })
+  /** Hover fill and text, matching `.iconBtn:hover`. */
+  const iconButtonHoverStyle = Object.freeze({
+    background: 'var(--dsw-alias-interactive-bg-hover)',
+    color: 'var(--dsw-alias-label-secondary)',
+  })
 
-  /** Reading text at full capsule contrast. */
-  const readingStyle = Object.freeze({ opacity: 0.85 })
-
-  /** Push the right-hand controls to the far end of the strip. */
-  const spacerStyle = Object.freeze({ marginInlineStart: 'auto' })
-
-  /** Status line style: the same row, spanning whatever the controls leave. */
-  const noticeStyle = Object.freeze({ flex: '1 1 auto', minWidth: 0 })
+  /** Disabled opacity, matching `.iconBtn:disabled`. */
+  const iconButtonDisabledStyle = Object.freeze({ opacity: 0.4, cursor: 'default' })
 
   /**
    * The dock's hook source: one session's live loop reading as an observable.
@@ -466,6 +534,8 @@
     // revision a fresh reference), or after NOTICE_MS when no frame follows —
     // whichever comes first. Nothing here polls.
     const [notice, setNotice] = React.useState(undefined)
+    /** Which icon button the pointer is over; drives the goal bar's hover fill. */
+    const [hover, setHover] = React.useState('')
     // The in-flight flag is a ref, not the `pending` state: two clicks inside one
     // render both read the state the last render closed over, so only the ref
     // actually blocks the second request on the wire.
@@ -504,8 +574,10 @@
         try {
           const result = await action()
           const text = outcomeTextOf(result, COMMAND_LINES[verb], t)
+          const failed = result === undefined || result === null || result.ok !== true
           setNotice({
             at: projected,
+            level: failed ? 'error' : 'status',
             text:
               text === undefined
                 ? verb === 'stop'
@@ -514,7 +586,11 @@
                 : text,
           })
         } catch (error) {
-          setNotice({ at: projected, text: error instanceof Error ? error.message : String(error) })
+          setNotice({
+            at: projected,
+            level: 'error',
+            text: error instanceof Error ? error.message : String(error),
+          })
         } finally {
           inFlight.current = ''
           setPending('')
@@ -522,39 +598,51 @@
       })()
     }
 
-    const buttons = [
-      React.createElement(
+    /** One 14px icon button, the goal bar's own size and states. */
+    const iconButton = (verb, label, icon) => {
+      const disabled = pending !== ''
+      return React.createElement(
         'button',
         {
-          key: 'stop',
+          key: verb,
           type: 'button',
-          'data-dsh-loop-action': 'stop',
-          disabled: pending !== '',
-          title: t('action.stop'),
-          style: buttonStyle,
+          'data-dsh-loop-action': verb,
+          disabled,
+          title: label,
+          'aria-label': label,
+          style: {
+            ...iconButtonStyle,
+            ...(disabled ? iconButtonDisabledStyle : hover === verb ? iconButtonHoverStyle : {}),
+          },
+          onMouseEnter: () => {
+            setHover(verb)
+          },
+          onMouseLeave: () => {
+            setHover('')
+          },
           onClick: () => {
-            run('stop', props.onStop)
+            run(verb, verb === 'stop' ? props.onStop : props.onNext)
           },
         },
-        t('action.stop'),
-      ),
-      React.createElement(
-        'button',
-        {
-          key: 'next',
-          type: 'button',
-          'data-dsh-loop-action': 'next',
-          disabled: pending !== '',
-          title: t('action.next'),
-          style: buttonStyle,
-          onClick: () => {
-            run('next', props.onNext)
-          },
-        },
-        pending === 'next' ? t('action.pending') : t('action.next'),
-      ),
-    ]
+        icon,
+      )
+    }
 
+    const stopIcon = React.createElement(
+      'svg',
+      { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true, focusable: false },
+      React.createElement('rect', { x: 4, y: 4, width: 8, height: 8, rx: 1.5, fill: 'currentColor' }),
+    )
+    const nextIcon = React.createElement(
+      'svg',
+      { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true, focusable: false },
+      React.createElement('path', { d: 'M4.6 3.4 10.2 8 4.6 12.6Z', fill: 'currentColor' }),
+      React.createElement('rect', { x: 10.7, y: 3.4, width: 1.7, height: 9.2, rx: 0.85, fill: 'currentColor' }),
+    )
+
+    // The label slot keeps the durable "which round" reading, exactly as the goal
+    // bar keeps its phase label while the objective slot carries the content: the
+    // flexing line below carries cadence · countdown · starter, or a verb receipt.
     return React.createElement(
       'div',
       {
@@ -563,22 +651,35 @@
         'data-dsh-loop-active': String(active),
         role: 'note',
         'aria-label': t('capsule.aria'),
-        style: capsuleStyle,
+        style: dockStyle,
       },
-      showingNotice
-        ? React.createElement('span', { key: 'notice', role: 'status', style: noticeStyle }, notice.text)
-        : [
-            React.createElement('span', { key: 'glyph', 'aria-hidden': true, style: dotStyle }, '⟳'),
-            React.createElement('span', { key: 'cadence', style: readingStyle }, state.cadenceText),
-            React.createElement('span', { key: 'd1', 'aria-hidden': true, style: dotStyle }, '·'),
-            React.createElement('span', { key: 'count', title: state.clock }, state.countdown),
-            React.createElement('span', { key: 'd2', 'aria-hidden': true, style: dotStyle }, '·'),
-            React.createElement('span', { key: 'round', style: readingStyle }, state.roundText),
-            React.createElement('span', { key: 'd3', 'aria-hidden': true, style: dotStyle }, '·'),
-            React.createElement('span', { key: 'starter', style: readingStyle }, state.starterText),
-            React.createElement('span', { key: 'spacer', style: spacerStyle }),
-          ],
-      buttons,
+      React.createElement(
+        'div',
+        { 'data-dsh-loop-bar': '', style: barStyle },
+        React.createElement('span', { key: 'glyph', 'aria-hidden': true, style: glyphStyle }, '⟳'),
+        React.createElement('span', { key: 'label', style: labelStyle }, state.roundText),
+        showingNotice
+          ? React.createElement(
+              'span',
+              {
+                key: 'notice',
+                role: notice.level === 'error' ? 'alert' : 'status',
+                style: notice.level === 'error' ? errorStyle : readingStyle,
+              },
+              notice.text,
+            )
+          : React.createElement(
+              'span',
+              { key: 'reading', title: state.clock, style: readingStyle },
+              [state.cadenceText, state.countdown, state.starterText].join(' · '),
+            ),
+        React.createElement(
+          'div',
+          { key: 'actions', style: actionsStyle },
+          iconButton('stop', pending === 'stop' ? t('action.pending') : t('action.stop'), stopIcon),
+          iconButton('next', pending === 'next' ? t('action.pending') : t('action.next'), nextIcon),
+        ),
+      ),
     )
   }
 

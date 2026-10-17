@@ -1,6 +1,6 @@
 {
   "name": "@xinvxueyuan/cordis-plugin-loop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cordis (DeepSeek Harness) plugin: the /loop command — run a task now, then keep it going on a fixed cadence or a model-chosen one",
   "type": "module",
   "main": "lib/index.js",

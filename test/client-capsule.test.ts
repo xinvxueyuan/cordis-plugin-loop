@@ -772,7 +772,7 @@ describe('capsule component', () => {
     )
   })
 
-  it('reads the loop projection and lays out every reading', () => {
+  it('reads the loop projection and lays out every reading on one card', () => {
     const active = armed({ mode: 'fixed', cadence: 'every 10 minutes', round: 7, startedBy: 'agent' })
     const { element, rendered, unmount } = render(active, async () => okText('x'))
     assert.deepEqual(rendered, ['loop'])
@@ -782,9 +782,16 @@ describe('capsule component', () => {
     assert.match(text, /下一轮/u)
     assert.match(text, /第 7 轮/u)
     assert.match(text, /模型发起/u)
-    assert.match(text, /停止/u)
-    assert.match(text, /立即下一轮/u)
     assert.equal(element.props['data-dsh-loop-state'], 'reading')
+    // The verbs are icon buttons now (goal-bar shape): their words live on the
+    // accessible name and the tooltip, not in the visible text.
+    const stop = findElement(element, (candidate) => candidate.props['data-dsh-loop-action'] === 'stop')
+    const next = findElement(element, (candidate) => candidate.props['data-dsh-loop-action'] === 'next')
+    assert.equal(stop?.props['aria-label'], '停止')
+    assert.equal(stop?.props.title, '停止')
+    assert.equal(next?.props['aria-label'], '立即下一轮')
+    assert.equal(next?.props.title, '立即下一轮')
+    assert.equal(textOf(stop as Element), '', 'an icon button shows no word')
     unmount()
   })
 
@@ -1137,7 +1144,16 @@ const THEME_TOKENS: readonly string[] = [
 ]
 
 /** Tokens another client package defines, not the theme. See the note above. */
-const LAYOUT_TOKEN_ALLOWLIST: readonly string[] = []
+const LAYOUT_TOKEN_ALLOWLIST: readonly string[] = [
+  // Composer geometry, defined by `dsh-client-ui-conversation` and read by the
+  // goal bar's own stylesheet (`dsh-client-ui-goal`, `GoalBar.module.css .dock`)
+  // to line the strip up with the composer card. The theme's `--dsw-*` set has no
+  // equivalent: these are layout distances the composer root publishes, not
+  // themeable design tokens, and the capsule copies the goal bar's recipe.
+  '--dsh-composer-side-clearance',
+  '--dsh-composer-dock-inset',
+  '--dsh-composer-card-max-width',
+]
 
 /** Every `var(--name…)` name in one source text, in order of appearance. */
 function tokenNamesIn(source: string): string[] {
@@ -1163,15 +1179,21 @@ describe('theme tokens', () => {
     )
   })
 
-  it('styles the capsule with the six real tokens the capsule needs', () => {
+  it('styles the card with the real tokens the goal bar styles itself with', () => {
     const used = tokenNamesIn(clientSource)
     for (const name of [
+      // the goal bar's own card recipe (GoalBar.module.css `.bar`/`.iconBtn`)
       '--dsw-alias-border-l1',
+      '--dsw-alias-label-tertiary',
+      '--dsw-alias-label-primary',
+      '--dsw-alias-label-primary-dimmed',
       '--dsw-alias-label-secondary',
-      '--dsw-font-xxs-12-font-size',
-      '--dsw-font-xxs-12-line-height',
+      '--dsw-alias-interactive-bg-hover',
+      '--dsw-alias-state-error-primary',
+      '--dsw-elevation-panel',
+      '--dsw-menu-backdrop-filter',
       '--dsw-radius-md',
-      '--dsw-radius-sm',
+      '--dsw-specific-menu',
     ]) {
       assert.ok(used.includes(name), `client.js must style with ${name}`)
     }
@@ -1187,9 +1209,9 @@ describe('theme tokens', () => {
   })
 
   it('reports a renamed token instead of passing it (mutation proof)', () => {
-    const mutated = clientSource.replace('--dsw-radius-md', '--dsw-radius-mdx')
+    const mutated = clientSource.replace('var(--dsw-elevation-panel)', 'var(--dsw-elevation-panelx)')
     assert.notEqual(mutated, clientSource, 'the mutation must actually change the source')
-    assert.deepEqual(unknownTokenNames(mutated), ['--dsw-radius-mdx'])
+    assert.deepEqual(unknownTokenNames(mutated), ['--dsw-elevation-panelx'])
     assert.deepEqual(unknownTokenNames(clientSource), [], 'the pristine bundle is clean')
   })
 
