@@ -229,7 +229,14 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 
 按钮不是第二条实现：它发的是**同一批命令**，因此拒绝面（子代理、kill switch、参数校验）与手打命令逐字一致。命令失败时控制条**原样显示**宿主回的文本（`message (code)`），不吞错。
 
-**观感说明**：0.2.0 的控制条是**输入框上方的一行控制条**（读数 + 两个操作）。与 `/goal` 卡片视觉对齐（卡片化外壳、图标按钮）是 **0.2.1** 的后续项，本文不把它描述成卡片。
+**观感（0.2.1 起与 `/goal` 同级）**：控制条现在是**卡片容器 + 图标按钮**，直接照抄本页 `/goal` 卡片的视觉配方——36px 卡片、`--dsw-radius-md`、`--dsw-elevation-panel`（描边色 `--dsw-alias-border-l1`）、底色 `--dsw-specific-menu` + 菜单背景滤镜、`padding: 4px 5px 4px 12px`、`gap: 10px`；结构为 `dock > bar > 字形 + 第 N 轮 + 读数行 + 两个 28×28 圆形图标按钮`（内联 SVG，各带 `title` 与 `aria-label`）。同页并排实测（scratch 会话同时挂 `/goal` 与 `/loop`）：圆角 12px、阴影逐字相同、`padding`/`height`/`gap`/`border-width`/`display` 全同、字形与文字尺寸全同、按钮 `28×28`/`999px`/`border 0`/`padding 0` 全同、**两卡同宽 896px**（composer 928px 未受挤压）。0.2.0 时它还是一行朴素控制条，视觉对齐是本版（0.2.1）的内容。
+
+两处**如实记录的小差异**（不影响同级观感）：
+
+1. `/goal` 用自身 `.bar::before` + `isolation` 承载底色与模糊，控制条用**自身计算值**达到同样的视觉效果（实测计算值一致：`rgba(67,69,74,0.45)` + `blur(40px) saturate(1.5)`）。
+2. `/goal` 的图标按钮带 Chrome 专有的 `corner-shape: round`，控制条**没有复制**这一条；`border-radius: 999px` 本身仍渲染为正圆。
+
+**主题 token**：控制条共引用 **14 个**——**11 个真 `--dsw-*` 主题 token** + **3 个 `--dsh-composer-*` 布局量**（后者的定义包与准入理由逐条写在 `test/client-capsule.test.ts` 的 `LAYOUT_TOKEN_ALLOWLIST` 里）。不存在的 `--dsh-*` 假 token 与 `var(--x, fallback)` 都由守卫拦住（含变异自检）。
 
 ---
 
@@ -497,6 +504,25 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | 验证 | 冻结字节上：`npm run build` / `npm run typecheck` / `npm test`（**200/200 · 10 suites · 3395.3193 ms · 自然退出**）/ `npm run test:integration`（`integration smoke: OK`）全 **exit 0**；主题对账（`DSH_THEME_CLIENT`）**41/41**；版本固化后复跑 build/typecheck/test 仍全绿（**200/200 · 3052.2314 ms**） |
 | 推送前密钥扫描 | 43 文件 × 12 类厂商形状（`ghp_`/`npm_`/`AKIA`/`glpat-`/`sk-`/`Bearer`/私钥块/基本认证 URL 等）**0 命中** |
 | 已知后续 | 控制条的**观感**（卡片化外壳、图标按钮）与 `/goal` 尚未对齐，列为 **0.2.1** 的后续项；"子代理会话的 client inspect 会被拒"这条宿主限制见上面的边界第 14 条 |
+
+---
+
+### 发布记录：v0.2.1（2026-10-17）—— 控制条视觉对齐 `/goal` 卡片（npm 侧已入队，**待维护者 2FA 批准**）
+
+| 项 | 值 |
+|---|---|
+| 内容 | 控制条改为**卡片容器 + 图标按钮**，与 `/goal` 同级观感（详见[控制条](#控制条)）；**无行为变化**（无 loop 隐藏、next 后 label +1、stop 后消失、零轮询、console Errors 0） |
+| 代码 delta | 恰两个文件：`client.js`（26612 B → 30021 B）、`test/client-capsule.test.ts`（59781 B → 61172 B），由质量门 r6 绑定（`428d0f58…f2ef` / `a7bffc60…2bd8`）；本任务只动 version/lock/README |
+| tag | annotated + GPG `v0.2.1`；tag 对象 `c12352ffc7ea38808b28559321e9b3cffdbc338f`，指向提交 `ab3ae85a8c164993e0783288c2b7f296ee521691`；`git tag -v` = Good signature（`xinvxueyuan (github)`，密钥 `6C6FD9B2…B35A`）。`v0.2.0 84dbce4b…`、`v0.1.1 e68b3fa0…`、`v0.1.0 9ae22118…` **未移动** |
+| 提交 | `ab3ae85a`「release: v0.2.1 — align the control bar with the /goal card (card container + icon buttons)」，**4 条显式路径**（`client.js`、`test/client-capsule.test.ts`、`package.json`、`package-lock.json`；无 `lib/`、无 `node_modules/`、未用 `git add -A`／`.`），4 files changed, +212/−89；push `main` 后该 sha 命中 **0 条 run**（未触发发布） |
+| CI | Publish run [`39017822042`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39017822042) **success**：`Test (node 24)`（`pass 200 · fail 0 · duration_ms 2528.681014`）、`Publish to GitHub Packages`、`Stage for npm` 三个 job 全绿；Release run [`39017822045`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39017822045) **success** |
+| npm stage | **stage id `4fba7165-3402-48f9-a943-9367090b55e3`、shasum `8954979fac8e428be6f8789e5c29d2d5ff6fe095`、provenance `logIndex=3292055373`**（`npm stage list` 只读复核逐字一致：`staged by: GitHub Actions (trusted automation)`、`tag: latest`、`access: public`）。**截至本文写作时该 stage 仍待维护者 2FA 批准**（`npm stage approve 4fba7165-3402-48f9-a943-9367090b55e3`）；批准后 `latest` 才会指向 0.2.1 |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.2.1>，三资产：`xinvxueyuan-cordis-plugin-loop-0.2.1.tgz`（138 928 B）、`SHA256SUMS`（107 B）、`SHA256SUMS.asc`（887 B，维护者对 `SHA256SUMS` 的分离签名，`gpg --verify` 为 Good signature） |
+| tgz 校验 | 下载后重算 SHA256 = `274d2d21dc0107eafb9004bf4e974d9bc7e6a772b691eabe03046999beaa9505`，与 `SHA256SUMS` 逐字一致；其 **SHA1 = `8954979fac8e428be6f8789e5c29d2d5ff6fe095`** == stage shasum ⇒ 与入队 tarball 是同一份字节 |
+| 构建来源证明 | `gh attestation verify <tgz\|SHA256SUMS> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.2.1` 两者均**退出 0**；负向对照 `refs/heads/main` 被拒（`expected SourceRepositoryRef to be refs/heads/main, got refs/tags/v0.2.1`）⇒ 只命中本 tag |
+| GitHub Packages | **`cordis-plugin-loop@0.2.1`**，包 id `15868485`、版本 id **`1401012051`**（2026-10-17T08:34:04Z） |
+| 验证 | 冻结字节：build / typecheck / `npm test`（**200/200 · 10 suites · 3012.774 ms · 自然退出**）/ `test:integration`（`integration smoke: OK`）/ 主题对账（`DSH_THEME_CLIENT`）**41/41** 全 exit 0；`npm pack --dry-run` 47 files，含 `client.js`(30.0 kB) 与 14 条 `src/`、凭据类条目 **0**；版本固化后复跑 build/typecheck/test 仍全绿（**200/200 · 3046.8932 ms**） |
+| 推送前密钥扫描 | 43 文件 × 12 类厂商形状 **0 命中** |
 
 ---
 
