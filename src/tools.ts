@@ -154,10 +154,12 @@ export function defineLoopNextTool(deps: RegistryDeps, enqueue: Enqueue): ToolDe
  * The description carries the whole decision: when to reach for it, what each
  * argument means, and what comes back. It is deliberately explicit that this
  * arms a real timer that will wake the session again, because the cost of an
- * unnecessary loop is paid by the user, not by the caller.
+ * unnecessary loop is paid by the user, not by the caller. The `dryRun`
+ * parameter's own rules live in that parameter's description; this one only
+ * points at it.
  */
 const LOOP_START_DESCRIPTION =
-  'Start a /loop in this session: run a task now, then keep running it on a cadence, waking this session again for every round. Use it when the user asks to keep watching, polling, retrying, or following something up, or when a long-running objective genuinely needs you to check back on your own — not for work you can finish in this turn, and not as a way to poll something you can await now. The loop is armed for this session only, and it is recorded as agent-started. cadence "fixed" fires on a wall-clock rhythm and needs seconds (a cron rule, rounded to whole minutes); cadence "self" waits a first safety interval and then you re-time every round with loop_next. Returns the loop id, the exact first wait, the expiry, and the round limit — reaching that limit stops the loop and says so. Its human counterpart is /loop.'
+  'Start a /loop in this session: run a task now, then keep running it on a cadence, waking this session again for every round. Use it when the user asks to keep watching, polling, retrying, or following something up, or when a long-running objective genuinely needs you to check back on your own — not for work you can finish in this turn, and not as a way to poll something you can await now. The loop is armed for this session only, and it is recorded as agent-started. cadence "fixed" fires on a wall-clock rhythm and needs seconds (a cron rule, rounded to whole minutes); cadence "self" waits a first safety interval and then you re-time every round with loop_next. Set dryRun to see what would be armed without arming it: a real start returns the loop id, the exact first wait, the expiry, and the round limit, while a preview carries no id — reaching that limit stops the loop and says so. Its human counterpart is /loop.'
 
 /**
  * Describe `loop_status` for the model.
@@ -197,6 +199,11 @@ export function defineLoopStartTool(deps: RegistryDeps, enqueue: Enqueue): ToolD
         description:
           'Wall-clock interval in seconds; required with cadence "fixed" and refused with a cadence hint on a self-paced loop. Example: 600 for every ten minutes.',
       },
+      dryRun: {
+        type: 'boolean',
+        description:
+          'True to preview only: describe the loop this call would arm and arm nothing. No schedule record is created and no round is delivered, so it is safe to call when you are unsure whether a loop is warranted, or to check a cadence before committing to it. It is answered even where a start would be refused — plan mode, a subagent session, the DSH_DISABLE_LOOP kill switch, or config.enabled: false — because a read is harmless; those conditions come back as a "Blockers:" line in the text instead of as an error. The text is a preview and says so; it carries no id. Defaults to false.',
+      },
     },
     output: {
       schema: {
@@ -219,6 +226,7 @@ export function defineLoopStartTool(deps: RegistryDeps, enqueue: Enqueue): ToolD
         task: args.task,
         ...(args.cadence === undefined ? {} : { cadence: args.cadence }),
         ...(args.seconds === undefined ? {} : { seconds: args.seconds }),
+        ...(args.dryRun === undefined ? {} : { dryRun: args.dryRun }),
       }
       return unwrap(await runLoopStart(deps, caller, request, enqueue))
     },

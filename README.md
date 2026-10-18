@@ -73,7 +73,47 @@ plugins:
 
 interval 单位：`s`/`sec`/`secs`/`second`/`seconds`、`m`/`min`/`mins`/`minute`/`minutes`、`h`/`hr`/`hrs`/`hour`/`hours`、`d`/`day`/`days`。
 
-明确错误：`0m`/`30s` → `interval must be at least 1 minute`；`>31d` → `interval must be at most 31 days`；空任务且无默认任务文件 → 列出两处候选路径；inline 任务超过 `maxTaskBytes` → 指出上限并建议改用任务文件。
+明确错误：`0m` → `interval must be a positive duration`（零时长不是时长，与"太短"是两回事）；`30s` → `interval must be at least 1 minute`；`>31d` → `interval must be at most 31 days`；空任务且无默认任务文件 → 列出两处候选路径；inline 任务超过 `maxTaskBytes` → 指出上限并建议改用任务文件。
+
+### 只预览不落地：`/loop --dry-run`
+
+`--dry-run` 是**前置标志**：只在**第一个 token 且精确等于** `--dry-run` 时被剥离；`/loop 10m check the --dry-run flag` 里的那个词是**任务文本**，不会被吞（同一条规则也适用于 `loop_start` 的 `dryRun`）。
+
+```text
+/loop --dry-run                      # 预览裸 /loop 形态（默认任务文件 + 10m 固定档）
+/loop --dry-run 10m                  # 预览固定档
+/loop --dry-run 盯住构建队列          # 预览自定档
+/loop --dry-run 10m 盯住构建队列      # 预览固定档 + 指定任务
+```
+
+预览文本的标签与顺序是固定契约（缺项不打印，且**绝不打印 `Id:`**——此刻没有记录）：
+
+```text
+Loop preview (nothing was armed):
+Mode: …
+Cron: …            （仅固定档）
+Jitter: …          （仅固定档）
+First fire: …      （仅固定档）/ First wait: …（自定档）
+Expires: …
+Round limit: …
+Task: …
+Title: …
+Would replace: …   （仅当本会话已有 loop）
+Blockers: none     （无条件时恰好一行；否则**每个条件各占一行**）
+This was a preview: no record was created and no round was delivered.
+```
+
+**`Blockers:` 是唯一可能重复的标签**：无条件时是单行 `Blockers: none`；有 N 个条件时就是 N 行，每行一个条件，**顺序与真实启动的求值顺序一致**（子代理 → 计划模式 → kill switch → `config.enabled`）——所以首行就是"真启动最先撞上的那条"拒绝。与真实启动不同的是：`startLoop` 撞到第一条就返回，预览**把全部条件都报出来**（这正是预览值得读的地方），且无论如何都不写。
+
+`--dry-run` 与 `status`/`next`/`stop` 组合会被拒绝，文案固定：
+
+```text
+--dry-run previews starting a loop; it cannot be combined with status, next or stop. Run /loop --dry-run <interval> [<task>] instead.
+```
+
+**预览是只读的，因此在"起不了 loop"的条件下依然允许执行**——计划模式、子代理会话、kill switch（`DSH_DISABLE_LOOP`）、`config.enabled: false`。此时返回 `ok: true`，并把条件逐条列进 `Blockers:`，**不做任何写操作**（不 `create`、不 `delete`、不做全局 `catalog()` 扫描）。这正是本功能的价值点：先看清会发生什么，再决定要不要起。
+
+请求本身**描述不出一个 loop** 时才是失败（`ok: false`），且用的是真实路径**同一句**拒绝：缺任务（`missingTaskMessage`）、任务超长、非法间隔（`0m`/`30s`/`>31d`）、工具 `cadence: "fixed"` 但缺 `seconds`。
 
 ---
 
@@ -204,7 +244,7 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 | `/loop stop all` / 裸 `/loop stop` | 停止本会话全部 loop 并回报条数 |
 | 模型 `loop_stop(reason)` | 删除记录并回报原因；没有 loop 时是**失败调用**（`isError`），不是静默成功 |
 | `/loop next` | **立刻投递一轮**并回报；固定节奏的记录计时**不被改写**（下一轮仍按原 cron），自定节奏的记录重锚到 60s |
-| 模型 `loop_start(cadence, task, rounds?)` | 起一个 loop，**与 `/loop` 共享同一实现**（`startLoop`）；回执写明 `[agent]`、真实落盘节奏与轮数上限。详见[模型工具](#模型工具) |
+| 模型 `loop_start(cadence, task, dryRun?)` | 起一个 loop，**与 `/loop` 共享同一实现**（`startLoop`）；回执写明 `[agent]`、真实落盘节奏与轮数上限。`dryRun: true` 时**只预览、不落地**（见[模型工具](#模型工具)） |
 | 模型 `loop_status()` | 只读返回六字段（`active`/`mode`/`cadence`/`nextAt`/`round`/`startedBy`），与 `/loop status` **同源** |
 | 控制条「停止」/「立即下一轮」 | 走 `ctx.remote.commands.execute(sessionId, '/loop stop'\|'/loop next', [])`，即**上面这些命令本身**（不是第二条实现） |
 
@@ -246,14 +286,18 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 
 | 工具 | 参数 | 行为 |
 |---|---|---|
-| `loop_start` | `task`、`cadence`（`fixed`/`self`）、`seconds`（固定档）、`rounds`（覆盖轮数上限） | 立刻投递第 1 轮并武装节奏；回执写明 `[agent]`、真实落盘节奏与轮数上限 |
+| `loop_start` | `task`、`cadence`（`fixed`/`self`）、`seconds`（固定档）、`dryRun`（只预览） | 立刻投递第 1 轮并武装节奏；回执写明 `[agent]`、真实落盘节奏与轮数上限。`dryRun: true` 时只预览、不落地 |
 | `loop_status` | 无 | 只读六字段 `{active, mode, cadence, nextAt, round, startedBy}`，与 `/loop status`、与会话投影**同源**（`loopFactsOf`）；`nextAt` 可空且**总是返回该键** |
 | `loop_next` | `seconds`、`reason` | 续拍（自定节奏）；固定节奏会被明确拒绝并说明理由 |
 | `loop_stop` | `reason` | 停止并回报原因；没有 loop 时是**失败调用**（`isError`） |
 
+**没有 `rounds` 参数**：轮数上限由配置 `maxRounds`（默认 24）决定，**工具不能按次覆盖**——一个能被调用方随手抬高的上限不是上限。要改上限就改 profile 配置。
+
+**`dryRun: true` 的规则写在参数描述里**（工具 description 只加一句指针，不重复）：预览是**成功调用**（`isError` 不置位），文本首行 `Loop preview (nothing was armed):`、末行 `This was a preview: no record was created and no round was delivered.`，**不创建记录、不投递任何一轮**。它在计划模式 / 子代理 / kill switch / `config.enabled: false` 下**依然可用**，把这些条件列进 `Blockers:`；请求本身描述不出 loop 时才是失败调用，用与真实启动**同一句**拒绝。工具路径的 `Title:` 带 `[agent] ` 前缀，与真实 `loop_start` 落盘记录的标题逐字一致。
+
 **轮数上限**：`loop_start` 起的 loop 与 `/loop` 起的一样受 `maxRounds`（默认 24）约束——达到上限由守卫结束该 loop，并把 `round-limit` 事件与最终说明写进会话。上限、7 天生命周期、两次遗漏是**三条独立**的结束路径，互不掩盖。
 
-**子代理边界**：子代理会话**不能**起/停 loop（宿主设计如此），`loop_start`/`loop_stop`/`loop_next`/`loop_status` 都会明确报错。
+**子代理边界**：子代理会话**不能起/停/续** loop（宿主设计如此），`loop_start`/`loop_stop`/`loop_next` 都会明确报错；**只读**的 `loop_status` 与 `/loop status` **不设拒绝**——读是安全的，持父会话 id 的子代理需要它查看父会话状态（源码注释见 `src/registry.ts`）；子代理以自己会话读时如实得到"本会话没有 loop"。`/loop --dry-run` 与 `loop_start({dryRun:true})` 同样放行：它只描述、不落地。
 
 ---
 
@@ -279,6 +323,10 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 | `ctx.commands` 缺失 | 工具照常注册，一条警告说明命令面缺失 |
 | 子代理会话调用 `/loop`（启动/停止）| 明确拒绝 |
 | 子代理会话调用 `loop_next` / `loop_stop` | 明确错误：`A subagent session has no loop of its own to continue/stop.`（即使伪造了父会话 id 也拒绝） |
+| 子代理会话调用 `loop_status` / `/loop status` | **不拒绝**：读是安全的，持父会话 id 的子代理需要它查看父会话状态（依据源码注释 `src/registry.ts`）；以自己会话读时如实得到"本会话没有 loop" |
+| 子代理会话调用 `/loop --dry-run` / `loop_start({dryRun:true})` | **不拒绝**：预览只描述、不落地，条件列进 `Blockers:` |
+| `--dry-run` 在计划模式 / 子代理 / kill switch / `config.enabled: false` 下 | **允许执行**（只读），把这些条件逐条列进 `Blockers:`；**零 create、零 delete、零全局 `catalog()` 扫描** |
+| `--dry-run` 与 `status` / `next` / `stop` 组合 | 拒绝，文案固定（见[语法](#只预览不落地loop---dry-run)） |
 
 **计划模式契约**：宿主 `@deepseek-ai/dsh-plan-mode` 按 **agent** 取状态——`get(agent)` 返回 `{ active }`（有待定选择时另带 `pending`），`set(agent, active)` 选择；服务本身**没有** `active` 属性。因此谓词是 `planMode.get(agentRef)?.active === true`，`agentRef` 是调用命令的那个 live agent 对象（`get` 内部走 `agent.session`）。
 
@@ -358,6 +406,11 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 12. **会话投影的推送边界**：`@deepseek-ai/dsh-session-projection` 只在 **state 与 wire view 引用同时变化**时推帧。因此投影值必须**按镜像 `revision` 重建**（每次变更换一个新对象）；"只给 state 加一个 revision 字段"不够——wire 侧看不到引用变化就不会推。0.2.0 的 `loop` 投影按这条实现（真 registry 实测）。
 13. **重启后的投影自愈延迟（V5-3）**：宿主重启后，**未被本实例服务过**的会话即使存储里有它的 loop，投影仍会读到 NO_LOOP，直到该会话发生一次带 sessionId 的入队活动（turn 结束 / 命令 / 工具调用）。控制条因此**最多延迟一个周期**才显示，之后自愈。
 14. **已知宿主限制：子代理会话的 client inspect 会被拒**。在子代理会话里对 `client/Slots`、`client/Builtin`、`client/Theme` 发 inspect 查询会被 `session/agent-busy: … owned by subagent routing` 拒绝（或 10 秒超时）。**真实浏览器 DOM 不受此限** ⇒ 需要活体取证时用页面 DOM（控制条自己渲染的 `data-dsh-loop-state` / `data-dsh-loop-active` 就是为此留的锚），不要据此判定"控制条没挂上"。
+15. **预览（`--dry-run`）的四条诚实边界**，全部写在预览文本里：
+    ① **`Cron:` 是 requested form，不是持久文本**：`dsh-schedule` 落盘时会把均匀列表规范化为 `a-b/n`（`src/cadence.ts:194-197` 的注释），所以那一行明写"the durable text is the create return value, not this line"；预览绝不声称自己打印的是持久文本。
+    ② **不编造首次触发时刻**：精确时刻来自 `create()` 返回的 `scheduledAt`（`src/engine.ts`），预览拿不到。固定档只给规则与确定性抖动偏移，`First fire:` 一行明写"not knowable before the record exists"；自定档的首次等待是可知的（`safetyCheckSeconds`），照给。
+    ③ **`Would replace:` 依赖一次读**：读到就列条数与短 id；**读失败时如实写"could not be read, so this preview cannot confirm what would be replaced"**，绝不写成"干净"（把读不到当成没有，是这类预览最容易犯的谎）。
+    ④ **`Expires:` 用 `if started now` 限定**：预览与真实启动不是同一瞬间，所以能对齐的是**生命周期长度**（`lifetime N days`），不是绝对时刻；文本按此措辞。
 
 其他边界：`/loop status` 与 `stop` 只看本会话、本插件自己的记录；header 损坏的外来记录既不列出也不删除；子代理永远没有自己的 loop；固定节奏记录由 cron 自己推进，**不依赖**本进程存活到下一次触发。
 
@@ -368,7 +421,7 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 ```bash
 npm run build             # tsc -p tsconfig.build.json → lib/
 npm run typecheck         # tsc --noEmit -p tsconfig.json
-npm test                  # node --test（本版 200 个用例 / 10 suites；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
+npm test                  # node --test（本版 217 个用例 / 10 suites；实际数字以输出为准：假时钟 + 真实 command/tool/schedule 装配）
 npm run test:integration  # node test/integration-smoke.ts（真实 1 秒级投递冒烟）
 npm run test:smoke:client # node test/client-live-smoke.ts（真 client.js 字节 + 真命令 runtime + 真工具 registry）
 ```
@@ -388,7 +441,8 @@ DSH_THEME_CLIENT="<profiles>/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/c
 | 默认任务文件（优先级 / 空文件 / 按字节截断） | 真实文件系统（临时目录） | `test/loopfile.test.ts` |
 | **平台中立守卫**（全测试集扫描：盘符字面量、模板字符串、正斜杠盘符） | 纯静态扫描（读 `test/*.ts` 源码，先屏蔽注释）+ 三种漏报形态与六种合法形态的自样本用例 | `test/platform-neutral.test.ts`（已列入 `npm test`；变异证明：把 Windows 期望注回 → `npm test` 120/121 红并指出该行） |
 | header 编解码 / 外来记录 / `v === 1` | 纯单元 | `test/state.test.ts` |
-| 命令语义（七种形式 + 拒绝面） | 直接驱动 `src/registry.ts`，假时钟 + catalogue 形状的 double | `test/command.test.ts` |
+| 命令语义（七种形式 + `--dry-run` + 拒绝面） | 直接驱动 `src/registry.ts`，假时钟 + catalogue 形状的 double | `test/command.test.ts` |
+| **预览（`--dry-run` / `dryRun`）**：标志文法、零副作用计数、**防漂移**（预览文本逐字段 vs 真实落盘记录解码值，命令面与工具面各一条）、Blockers 全表、`Would replace:` 读失败、**投影零 revision / 零推帧**、真实 `ScheduleService` 上 `catalog()` 行数与投递窗口 | 假时钟 double（精确计数）+ **真实 `@deepseek-ai/dsh-schedule` + 真实 JSON 存储** + **真实 `@deepseek-ai/dsh-session-projection`** | `test/preview.test.ts`（已列入 `npm test`） |
 | 命令**注册面与调用面** | **真实 `ctx.commands`（CommandRuntime）**：定义经 `normalizeDefinition` 接受，调用走 `parseCommand` + `command/run`/`command/done` 生命周期 | `test/register.test.ts` |
 | 两个工具 | **真实 `ctx.tools`（ToolRuntime）**：schema 编译 + `execute` + `isError` 语义 | `test/tools.test.ts` |
 | 自定节奏 / 两次遗漏 / 过期 | 引擎直调（假时钟）+ **真实 cordis 事件派发**（`ctx.emit('agent/turn-stopping')`） | `test/lifecycle.test.ts` |
@@ -563,4 +617,4 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 `@xinvxueyuan/cordis-plugin-loop` implements DSH's `/loop`: run a task **now**, then keep it running on a fixed wall-clock cadence (cron + deterministic jitter) or a self-paced one (`loop_next` / `loop_stop`). Each loop is one durable `@deepseek-ai/dsh-schedule` task whose title and prompt carry all of its mutable state, so a continuation, a stop, and the omission safety net are all one in-place `ctx.schedule.update` — a session never owns more than one loop record.
 
-Seven call forms (plus `/loop next` to deliver a round immediately), wall-clock cron for every fixed cadence, nearest-step snapping with ties upward, `min(10% of the normalized period, 900s)` of jitter drawn from a stable fingerprint and expressed in the cron phase, a configurable round limit (`maxRounds`, default 24), a 7-day lifetime, a two-strike omission guard on `agent/turn-stopping`, `.dsh/loop.md` default tasks that are re-read every round through a pointer, plan-mode and kill-switch refusals, and an inert path when `ctx.schedule` is absent. The model can also start and read a loop itself through the `loop_start` / `loop_status` tools — the same `startLoop` implementation the `/loop` command uses — and a control bar above the composer (`conversation.input.dock`, id `loop`, order 5) shows the cadence, the next-round countdown, the round number and the starter, with stop / next-round buttons that simply execute `/loop stop` / `/loop next` through `ctx.remote.commands.execute`. Card-style visual parity with `/goal` is a 0.2.1 follow-up. See the Chinese sections above for the per-band truth table, the header format and its foreign-record boundary, the configuration table, and the deviation list.
+Seven call forms (plus `/loop next` to deliver a round immediately, and a leading `--dry-run` flag that describes a loop without arming it), wall-clock cron for every fixed cadence, nearest-step snapping with ties upward, `min(10% of the normalized period, 900s)` of jitter drawn from a stable fingerprint and expressed in the cron phase, a configurable round limit (`maxRounds`, default 24), a 7-day lifetime, a two-strike omission guard on `agent/turn-stopping`, `.dsh/loop.md` default tasks that are re-read every round through a pointer, plan-mode and kill-switch refusals, and an inert path when `ctx.schedule` is absent. The model can also start and read a loop itself through the `loop_start` / `loop_status` tools — the same `startLoop` implementation the `/loop` command uses, with `dryRun: true` for the same read-only preview — and a control bar above the composer (`conversation.input.dock`, id `loop`, order 5) shows the cadence, the next-round countdown, the round number and the starter, with stop / next-round buttons that simply execute `/loop stop` / `/loop next` through `ctx.remote.commands.execute`. Card-style visual parity with `/goal` is a 0.2.1 follow-up. See the Chinese sections above for the per-band truth table, the header format and its foreign-record boundary, the configuration table, and the deviation list.

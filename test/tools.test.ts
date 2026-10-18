@@ -277,9 +277,74 @@ test('the tool descriptions state the contract the model needs', async () => {
     assert.match(start.description, /cadence "fixed" fires on a wall-clock rhythm and needs seconds/u)
     assert.match(start.description, /re-time every round with loop_next/u)
     assert.match(start.description, /round limit/u)
+    // The `dryRun` rules live in the parameter's own description, not repeated
+    // in the tool description; the description only points at it.
+    assert.match(start.description, /Set dryRun to see what would be armed without arming it/u)
     assert.match(status.description, /without changing anything/u)
     assert.match(status.description, /startedBy \(user when a person ran \/loop, agent when you ran loop_start\)/u)
     assert.match(status.description, /never disagrees with \/loop status/u)
+  } finally {
+    await host.dispose()
+  }
+})
+
+test('loop_start carries a dryRun parameter whose schema compiles and whose body previews only', async () => {
+  const double = new FakeSchedule()
+  const host = await bootHost({ sessionId: 'tools', scheduleDouble: double })
+  try {
+    const agent = loopAgentOf(host)
+    const runtime = host.rawToolRuntime() as unknown as {
+      get(name: string):
+        | {
+            parameters: { properties?: Record<string, { type?: string; description?: string }> }
+          }
+        | undefined
+    }
+    const definition = runtime.get('loop_start')
+    assert.ok(definition !== undefined, 'loop_start must be registered')
+    const parameter = definition.parameters.properties?.['dryRun']
+    assert.ok(parameter !== undefined, 'loop_start must declare dryRun')
+    assert.equal(parameter.type, 'boolean')
+    // The rules a caller needs are on the parameter itself.
+    assert.match(parameter.description ?? '', /preview only/u)
+    assert.match(parameter.description ?? '', /no round is delivered/u)
+    assert.match(parameter.description ?? '', /Blockers:/u)
+    assert.match(parameter.description ?? '', /Defaults to false/u)
+
+    // Through the real registry: a preview is a successful call that writes
+    // nothing, and the structured parameter is accepted by the schema.
+    const preview = await runTool(
+      host,
+      'loop_start',
+      { task: 'watch the deploy', cadence: 'fixed', seconds: 600, dryRun: true },
+      agent,
+    )
+    assert.equal(preview.isError, false, preview.text)
+    assert.match(preview.text, /^Loop preview \(nothing was armed\):/u)
+    assert.match(preview.text, /Title: \[agent\] DSH \/loop: watch the deploy/u)
+    assert.match(preview.text, /Blockers: none/u)
+    assert.match(preview.text, /This was a preview: no record was created and no round was delivered\./u)
+    assert.equal(double.createCalls, 0, 'the tool preview must not create a record')
+    assert.equal(double.size, 0)
+    assert.equal(host.agent.messages.length, 0, 'the tool preview must not deliver a round')
+
+    // `dryRun: false` is the real start, unchanged.
+    const real = await runTool(
+      host,
+      'loop_start',
+      { task: 'watch the deploy', cadence: 'fixed', seconds: 600, dryRun: false },
+      agent,
+    )
+    assert.equal(real.isError, false, real.text)
+    assert.match(real.text, /^Loop started\./u)
+    assert.equal(double.createCalls, 1)
+    assert.equal(double.size, 1)
+    assert.equal(host.agent.messages.length, 1)
+
+    // A wrong type for dryRun is refused by the compiled schema, before the body.
+    const wrongType = await runTool(host, 'loop_start', { task: 'x', dryRun: 'yes' }, agent)
+    assert.equal(wrongType.isError, true)
+    assert.equal(double.createCalls, 1, 'a schema refusal must not reach the body')
   } finally {
     await host.dispose()
   }

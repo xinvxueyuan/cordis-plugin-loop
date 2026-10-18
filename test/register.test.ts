@@ -63,7 +63,9 @@ test('with a schedule service the plugin registers one command and four tools', 
     )
     const definition = host.commands.definitions[0]!
     assert.equal(definition.definitionId, '@xinvxueyuan/cordis-plugin-loop')
-    assert.equal(definition.hint, '[<interval>] [<task>] | status | next | stop [<id>|all]')
+    // The hint advertises the preview flag, because it is the one thing a
+    // caller cannot discover from the other forms.
+    assert.equal(definition.hint, '[--dry-run] [<interval>] [<task>] | status | next | stop [<id>|all]')
     assert.equal(
       definition.description,
       'Run a task now, then keep checking it on a cadence',

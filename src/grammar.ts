@@ -1,7 +1,7 @@
 /**
  * The `/loop` command grammar.
  *
- * Eight call forms are accepted; the reserved words (`status`, `stop`, `next`)
+ * Seven call forms are accepted; the reserved words (`status`, `stop`, `next`)
  * are only reserved when the whole input matches them exactly, so
  * `stop the build` and `next steps for the review` stay task text.
  * @module cordis-plugin-loop/grammar
@@ -126,4 +126,36 @@ export function parseLoopInput(rawInput: string): LoopCommand {
  */
 export function tokensOf(input: string): string[] {
   return input.trim().split(/\s+/u).filter((token) => token.length > 0)
+}
+
+/** The one spelling of the preview flag; matched exactly, never as a prefix. */
+export const DRY_RUN_FLAG = '--dry-run'
+
+/**
+ * Lift a leading `--dry-run` flag out of one `/loop` invocation.
+ *
+ * The flag is recognized **only** as the first token and only on an exact
+ * match, so `/loop 10m check the --dry-run flag` keeps that word as task text:
+ * a preview must never swallow part of the work it is previewing.
+ *
+ * What may follow it is **any whitespace**, not just a space. That is not
+ * cosmetic: a caller who wrote `--dry-run<TAB>10m` meant a preview, and treating
+ * the tab as part of the flag's absence would silently turn the whole line into
+ * task text and *arm a real loop*. The separator is therefore tested as a
+ * character class, and end-of-input counts as a separator too.
+ *
+ * @param input - Text following the command name, verbatim.
+ * @returns Whether the flag was present, and the input without it.
+ */
+export function stripDryRunFlag(input: string): { readonly dryRun: boolean; readonly input: string } {
+  const trimmed = input.trim()
+  if (trimmed === DRY_RUN_FLAG) return { dryRun: true, input: '' }
+  // The leading check is not redundant with the whitespace test below: without
+  // it a word that merely *contains* the flag — `10m check the --dry-run flag` —
+  // would match from that offset and the flag would be swallowed out of the
+  // task text.
+  if (!trimmed.startsWith(DRY_RUN_FLAG)) return { dryRun: false, input }
+  const rest = trimmed.slice(DRY_RUN_FLAG.length)
+  if (!/^\s/u.test(rest)) return { dryRun: false, input }
+  return { dryRun: true, input: rest.trim() }
 }

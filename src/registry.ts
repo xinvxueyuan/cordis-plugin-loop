@@ -6,11 +6,13 @@
  * the same record.
  * @module cordis-plugin-loop/registry
  */
-import { parseLoopInput } from './grammar.ts'
+import { jitterCapMinutes } from './cadence.ts'
+import { parseLoopInput, stripDryRunFlag } from './grammar.ts'
 import { missingTaskMessage, resolveLoopFile } from './loopfile.ts'
+import { planLoop, type LoopPlan } from './plan.ts'
 import { buildPrompt } from './state.ts'
 import type { LoopConfig } from './config.ts'
-import type { EngineResult, LoopAgent, LoopEngine } from './engine.ts'
+import { buildTitle, type EngineResult, type LoopAgent, type LoopEngine, type StartRequest } from './engine.ts'
 import { NO_LOOP, UNAVAILABLE_LOOP, closedRounds, loopFactsOf, loopViewOf } from './loop-projection.ts'
 import type { LoopProjectionView } from './loop-projection.ts'
 import type { LoopRecord } from './state.ts'
@@ -213,30 +215,54 @@ async function armLoop(
   instruction: StartInstruction,
   surface: LoopSurface,
 ): Promise<EngineResult> {
-  const agent = agentOf(caller)
+  const request = resolveStartRequest(deps, caller, instruction)
+  if ('error' in request) return { ok: false, text: request.error }
+  return deps.engine.start(agentOf(caller), { ...request.request, startedBy: surface })
+}
+
+/**
+ * Resolve one instruction's task source into an engine start request.
+ *
+ * The read-only preview calls this too, so "where does the task come from, and
+ * is there one at all" has exactly one implementation and one refusal text.
+ *
+ * @param deps - Registry dependencies.
+ * @param caller - Invoking session.
+ * @param instruction - Normalized instruction.
+ * @returns The engine request, or the refusal text.
+ */
+export function resolveStartRequest(
+  deps: RegistryDeps,
+  caller: Caller,
+  instruction: StartInstruction,
+): { readonly request: StartRequest } | { readonly error: string } {
   if (instruction.kind === 'self-paced') {
-    return deps.engine.start(agent, { mode: 'self', startedBy: surface, task: instruction.task })
+    return { request: { mode: 'self', startedBy: 'user', task: instruction.task } }
   }
   if (instruction.task !== undefined) {
-    return deps.engine.start(agent, {
-      mode: 'fixed',
-      startedBy: surface,
-      requestedSeconds: instruction.requestedSeconds,
-      task: instruction.task,
-    })
+    return {
+      request: {
+        mode: 'fixed',
+        startedBy: 'user',
+        requestedSeconds: instruction.requestedSeconds,
+        task: instruction.task,
+      },
+    }
   }
   if (!instruction.useTaskFile) {
-    return { ok: false, text: 'A loop needs a task: pass one inline or create the default loop task file.' }
+    return { error: 'A loop needs a task: pass one inline or create the default loop task file.' }
   }
   const file = resolveLoopFile(caller.cwd, deps.config.maxTaskBytes, deps.env)
-  if (file.task === undefined) return { ok: false, text: missingTaskMessage(caller.cwd, deps.env) }
-  return deps.engine.start(agent, {
-    mode: 'fixed',
-    startedBy: surface,
-    requestedSeconds: instruction.requestedSeconds,
-    taskFile: file.path,
-    truncated: file.truncated,
-  })
+  if (file.task === undefined) return { error: missingTaskMessage(caller.cwd, deps.env) }
+  return {
+    request: {
+      mode: 'fixed',
+      startedBy: 'user',
+      requestedSeconds: instruction.requestedSeconds,
+      taskFile: file.path,
+      truncated: file.truncated,
+    },
+  }
 }
 
 /**
@@ -282,13 +308,37 @@ export async function runLoopCommand(
   rawInput: string,
   enqueue: Enqueue,
 ): Promise<EngineResult> {
-  const command = parseLoopInput(rawInput)
+  // The preview flag is lifted off the front first: it decides whether a start
+  // is armed or merely described, and it must be gone before the grammar reads
+  // the rest. An input without the flag is returned verbatim, so every existing
+  // path keeps the exact text it was given.
+  const flag = stripDryRunFlag(rawInput)
+  const command = parseLoopInput(flag.input)
+  // `startInstructionOf` is the single source of truth for "is this input a
+  // start at all": it answers `undefined` for exactly the control forms
+  // (`status`, `next`, `stop`). Reusing it here is what keeps the preview's
+  // rejection surface and the grammar from drifting apart.
+  const startable = startInstructionOf(flag.input)
   const agent = agentOf(caller)
+  // A preview describes a start, so combining it with a control subcommand is
+  // refused before that subcommand can run: `/loop --dry-run stop` must never
+  // stop anything, and `/loop --dry-run status` must never be mistaken for a
+  // preview of a task literally named "status".
+  if (flag.dryRun && startable === undefined) return { ok: false, text: DRY_RUN_CONTROL_REFUSAL }
   if (command.kind === 'status') return enqueue(() => deps.engine.status(agent), caller.sessionId)
+  if (flag.dryRun && startable !== undefined) {
+    // A preview is read-only by construction, so it is allowed exactly where a
+    // start is refused — a delegated child included, which is the whole point of
+    // describing a loop before anyone commits to it. It still rides the serial
+    // queue, because it reads the same state a real start would read and must
+    // see a consistent snapshot of it.
+    return enqueue(() => previewLoop(deps, caller, startable, 'user'), caller.sessionId)
+  }
   // Every mutating subcommand sits behind the same refusal, `next` included: a
   // delegated child that forged its parent's session id must not be able to make
-  // that session run a round. `status` stays above the guard because reading is
-  // harmless and a child may legitimately ask what its parent is doing.
+  // that session run a round. `status` and the preview stay above the guard
+  // because reading is harmless and a child may legitimately ask what its parent
+  // is doing, or what a loop would do.
   if (caller.isSubagent) {
     return { ok: false, text: 'A subagent session cannot start or stop a loop.' }
   }
@@ -299,6 +349,183 @@ export async function runLoopCommand(
   // The origin is `user` on this path by construction: only a person types into
   // the composer. The tool's path differs in exactly this argument.
   return startLoop(deps, caller, instruction, 'user', enqueue)
+}
+
+/** The fixed refusal for `--dry-run` combined with a control subcommand. */
+export const DRY_RUN_CONTROL_REFUSAL =
+  '--dry-run previews starting a loop; it cannot be combined with status, next or stop. Run /loop --dry-run <interval> [<task>] instead.'
+
+/**
+ * Describe the loop a start would arm, without arming anything.
+ *
+ * This is the whole point of the preview: it answers "what would happen" even
+ * where a start is impossible — a plan-mode session, a delegated child, a
+ * profile under the kill switch — because a read is always safe. Those
+ * conditions are reported as `Blockers:` lines on a successful result; a request
+ * that does not describe a loop at all is refused with the same sentence the
+ * real start uses.
+ *
+ * @param deps - Registry dependencies.
+ * @param caller - Invoking session.
+ * @param instruction - Normalized start instruction.
+ * @param surface - `user` for the command, `agent` for the tool.
+ * @returns The preview text, or the refusal text.
+ */
+export async function previewLoop(
+  deps: RegistryDeps,
+  caller: Caller,
+  instruction: StartInstruction,
+  surface: LoopSurface,
+): Promise<EngineResult> {
+  const resolved = resolveStartRequest(deps, caller, instruction)
+  if ('error' in resolved) return { ok: false, text: resolved.error }
+  const request: StartRequest = { ...resolved.request, startedBy: surface }
+  const planned = planLoop(
+    {
+      sessionId: caller.sessionId,
+      mode: request.mode,
+      startedBy: request.startedBy,
+      ...(request.requestedSeconds === undefined ? {} : { requestedSeconds: request.requestedSeconds }),
+      ...(request.task === undefined ? {} : { task: request.task }),
+      ...(request.taskFile === undefined ? {} : { taskFile: request.taskFile }),
+      ...(request.truncated === true ? { truncated: true } : {}),
+      config: deps.config,
+      timeZone: deps.engine.timeZone,
+      now: deps.engine.now(),
+    },
+    { available: deps.engine.available, buildTitle, buildPrompt },
+  )
+  if ('error' in planned) return { ok: false, text: planned.error }
+  const blockers = previewBlockers(deps, caller)
+  const agent = agentOf(caller)
+  let replace: readonly string[] | undefined
+  const listed = await deps.engine.list(agent)
+  if (listed.ok) {
+    if (listed.loops.length > 0) replace = Object.freeze(listed.loops.map((loop) => shortOf(loop.id)))
+  } else {
+    // An unreadable state is not a clean one: saying "nothing would be replaced"
+    // here would be a claim the read did not establish.
+    replace = Object.freeze([`could not be read, so this preview cannot confirm what would be replaced: ${listed.text}`])
+  }
+  return { ok: true, text: renderPreview(planned, blockers, replace, deps.config.maxRounds, deps.config.lifetimeDays) }
+}
+
+/**
+ * List the conditions that would stop this start from landing right now.
+ *
+ * Each line reuses the refusal the real path would produce, so a preview never
+ * invents a second vocabulary for the same guard. An empty list means the start
+ * would land.
+ *
+ * The conditions are pushed in the order `startLoop` evaluates them — subagent,
+ * then plan mode, then the kill switch and `config.enabled` — so the first line
+ * a reader sees is the one a real start would hit first. Unlike `startLoop`,
+ * which returns on the first refusal, this reports **every** condition that
+ * holds: a preview is worth reading precisely because it shows the whole
+ * picture, and it writes nothing either way.
+ *
+ * @param deps - Registry dependencies.
+ * @param caller - Invoking session.
+ * @returns One line per condition, in the order the real guards are evaluated.
+ */
+function previewBlockers(deps: RegistryDeps, caller: Caller): readonly string[] {
+  const blockers: string[] = []
+  if (caller.isSubagent) blockers.push('A subagent session cannot start or stop a loop.')
+  // The plan-mode probe is evaluated exactly as `startLoop` evaluates it, with
+  // the live agent reference, so a preview and a start can never disagree about
+  // whether plan mode is active.
+  if (deps.planMode?.(caller.agentRef) === true) blockers.push(PLAN_MODE_REFUSAL)
+  if (deps.killSwitch()) {
+    blockers.push(
+      'The DSH_DISABLE_LOOP kill switch is set, so no new loop may start (a real start would also cancel every existing loop).',
+    )
+  }
+  if (!deps.config.enabled) blockers.push('config.enabled is false, so no new loop may start.')
+  return Object.freeze(blockers)
+}
+
+/**
+ * Render one preview.
+ *
+ * The labels and their order are a fixed contract; a label whose value is
+ * unknown is omitted rather than filled with a guess. `Id:` is never printed:
+ * nothing was created, so there is no id to print.
+ *
+ * Every line that both surfaces can print is worded exactly as the start
+ * confirmation words it, so a reader comparing the preview with the text a real
+ * start returns sees one vocabulary rather than two.
+ *
+ * `Blockers:` is the one label that may repeat: `none` is a single line, and
+ * otherwise each condition gets its own `Blockers:` line.
+ *
+ * @param plan - The normalized loop a start would store.
+ * @param blockers - Conditions that would stop the start from landing.
+ * @param replace - Short ids of the loops a start would replace, or one line
+ *   explaining why that could not be read.
+ * @param maxRounds - The configured round limit.
+ * @param lifetimeDays - The configured lifetime, in days.
+ * @returns The multi-line preview.
+ */
+export function renderPreview(
+  plan: LoopPlan,
+  blockers: readonly string[],
+  replace?: readonly string[],
+  maxRounds = 0,
+  lifetimeDays = 0,
+): string {
+  const lines = ['Loop preview (nothing was armed):']
+  if (plan.mode === 'self') {
+    lines.push('Mode: self-paced (the wait is replaced each round with loop_next)')
+  } else {
+    lines.push(`Mode: fixed, wall-clock anchored (${plan.cadenceLabel})`)
+    // The exact first firing instant is the `create` return value's
+    // `scheduledAt`, which no preview can know; what a preview does know is the
+    // rule and the deterministic phase offset drawn for it.
+    lines.push(
+      `Cron: ${plan.expression} (requested form; the schedule service canonicalizes the expression when it stores it, so the durable text is the create return value, not this line)`,
+    )
+    // A self-paced loop carries no wall-clock phase, so it prints no `Jitter:`
+    // line — the same reason the confirmation text omits it there.
+    const cap = jitterCapMinutes(plan.cadenceSeconds)
+    lines.push(
+      plan.offsetMinutes > 0
+        ? `Jitter: ${plan.jitterSeconds}s = ${plan.offsetMinutes} minute(s), drawn from min(10% of the normalized cadence, 15 min) with fingerprint ${plan.fingerprint}`
+        : cap === 0
+          ? `Jitter: 0 (minute precision cannot express a smaller offset for this cadence; fingerprint ${plan.fingerprint})`
+          : `Jitter: 0 (the fingerprint drew no offset; this cadence could carry up to ${cap} minute(s). fingerprint ${plan.fingerprint})`,
+    )
+  }
+  if (plan.mode === 'self') {
+    lines.push(
+      `First wait: ${plan.firstWaitSeconds} seconds (self-paced safety check); round 1 would run immediately.`,
+    )
+  } else {
+    lines.push(
+      'First fire: not knowable before the record exists — the exact instant is the schedule service\u2019s own next occurrence for the rule above, returned by create as scheduledAt.',
+    )
+  }
+  lines.push(
+    `Expires: ${new Date(plan.expiresAt).toISOString()} (if started now; lifetime ${lifetimeDays} days)`,
+  )
+  lines.push(`Round limit: ${maxRounds} (reaching it stops the loop and says so)`)
+  lines.push(`Task: ${previewTaskLine(plan)}`)
+  lines.push(`Title: ${plan.title}`)
+  if (replace !== undefined) lines.push(`Would replace: ${replace.join(', ')}`)
+  // One condition per line. Joining them would turn a four-condition preview
+  // into a single unreadable paragraph and would hide *how many* things stand in
+  // the way; `none` stays the one-line positive statement it always was.
+  if (blockers.length === 0) lines.push('Blockers: none')
+  else for (const blocker of blockers) lines.push(`Blockers: ${blocker}`)
+  lines.push('This was a preview: no record was created and no round was delivered.')
+  return lines.join('\n')
+}
+
+/** Describe the task source of one planned loop, with its unit spelled out. */
+function previewTaskLine(plan: LoopPlan): string {
+  if (plan.state.taskFile !== undefined) {
+    return `${plan.state.taskFile} (file budget: bytes)${plan.state.truncated === true ? ', truncated at the byte budget' : ''}`
+  }
+  return `${plan.taskCodePoints} code points, inline`
 }
 
 /** How long `/loop next` arms the record for after it delivers the round. */
@@ -443,7 +670,9 @@ function nextRoundPrompt(state: LoopState, id: string, nextSeconds: number | und
  *
  * A sibling of {@link runLoopCommand}: it resolves the structured tool
  * arguments into the same {@link StartInstruction} and hands them to the same
- * {@link startLoop}, recording `agent` as the origin instead of `user`.
+ * {@link startLoop}, recording `agent` as the origin instead of `user`. With
+ * `dryRun` it hands them to {@link previewLoop} instead, which is the same
+ * resolution with nothing written.
  *
  * @param deps - Registry dependencies.
  * @param caller - Invoking session.
@@ -459,6 +688,11 @@ export async function runLoopStart(
 ): Promise<EngineResult> {
   const instruction = startInstructionFromTool(request)
   if ('error' in instruction) return { ok: false, text: instruction.error }
+  if (request.dryRun === true) {
+    // The tool's own origin is `agent`, so the preview must say so too: its
+    // `Title:` line carries the `[agent] ` prefix the real start would store.
+    return enqueue(() => previewLoop(deps, caller, instruction, 'agent'), caller.sessionId)
+  }
   return startLoop(deps, caller, instruction, 'agent', enqueue)
 }
 
@@ -470,6 +704,15 @@ export interface StartToolRequest {
   readonly seconds?: number
   /** The work each round must do. */
   readonly task: string
+  /**
+   * Describe the loop without arming it.
+   *
+   * A preview is read-only, so it is answered where a start would be refused
+   * (plan mode, a delegated child, the kill switch, `enabled: false`) and the
+   * condition is reported as a `Blockers:` line instead. Nothing is created and
+   * no round is delivered.
+   */
+  readonly dryRun?: boolean
 }
 
 /**

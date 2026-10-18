@@ -9,15 +9,9 @@
  * than one loop created by this plugin.
  * @module cordis-plugin-loop/engine
  */
-import {
-  approximationNote,
-  cronExpression,
-  jitterCapMinutes,
-  jitterMinutes,
-  loopFingerprint,
-  normalizeFixed,
-} from './cadence.ts'
+import { jitterCapMinutes } from './cadence.ts'
 import { buildPrompt, ownerOf, selectLoopRecords, shortId, TASK_TITLE, type LoopRecord } from './state.ts'
+import { codePointLength as countCodePoints, planLoop, type PlanInput } from './plan.ts'
 import { roundsStarted } from './loop-projection.ts'
 import { firstRoundPrompt } from './prompt.ts'
 import type { LoopConfig } from './config.ts'
@@ -141,6 +135,11 @@ export class LoopEngine {
     return this.deps.schedule !== undefined
   }
 
+  /** The explicit IANA time zone every cron record of this engine carries. */
+  get timeZone(): string {
+    return this.deps.timeZone
+  }
+
   /**
    * Read the engine's clock.
    *
@@ -162,96 +161,45 @@ export class LoopEngine {
    */
   async start(agent: LoopAgent, request: StartRequest): Promise<EngineResult> {
     const schedule = this.deps.schedule
-    if (schedule === undefined) {
-      return { ok: false, text: 'The schedule service is not composed, so /loop cannot create a reminder.' }
-    }
     if (agent.isSubagent) {
       return { ok: false, text: 'A subagent session cannot start a loop.' }
     }
+    const now = this.clock()
+    // Every refusal and every normalization below is shared with the read-only
+    // `--dry-run` preview (`src/plan.ts`), so a preview cannot disagree with what
+    // this call would store. The refusals keep their exact original wording.
+    const planned = planLoop(this.planInputOf(agent, request, now), {
+      available: schedule !== undefined,
+      buildTitle,
+      buildPrompt,
+    })
+    if ('error' in planned) return { ok: false, text: planned.error }
+    const plan = planned
+    const state = plan.state
     const task = request.task ?? ''
-    if (task.trim().length === 0 && request.taskFile === undefined) {
-      return { ok: false, text: 'A loop needs a task: pass one inline or create the default loop task file.' }
-    }
-    // The inline limit is counted in code points, so one astral character is one
-    // unit; the default task file is budgeted in bytes instead (see README).
-    const taskCodePoints = codePointLength(task)
-    if (taskCodePoints > this.deps.config.maxTaskBytes) {
-      return {
-        ok: false,
-        text: `The task is ${taskCodePoints} code points; the accepted maximum is ${this.deps.config.maxTaskBytes}. Move it into a loop task file instead.`,
-      }
-    }
+    const taskCodePoints = plan.taskCodePoints
     const listed = await this.list(agent)
     if (!listed.ok) return { ok: false, text: listed.text }
     const existing = listed.loops
-    const identity = task.length > 0 ? task : `file:${request.taskFile ?? ''}`
-    const now = this.clock()
-    let cadenceSeconds = 0
-    let cadenceLabel = 'self-paced'
-    // The identity deliberately excludes the origin: `startedBy` was added after
-    // v0.1.1 shipped, and folding it in would re-draw the jitter phase (and so
-    // re-order the cron expression) of every loop a user restarts the same way.
-    // Which surface armed a loop is disclosed in the title and the confirmation
-    // text instead.
-    let fingerprint = loopFingerprint(agent.sessionId, 0, identity)
-    let offsetMinutes = 0
-    let expression: string | undefined
-    let approximation: string | undefined
-    if (request.mode === 'fixed') {
-      const requestedSeconds = request.requestedSeconds ?? Number.NaN
-      const probe = normalizeFixed(requestedSeconds)
-      if ('error' in probe) return { ok: false, text: probe.error }
-      cadenceSeconds = probe.periodSeconds
-      cadenceLabel = probe.label
-      approximation = approximationNote(probe, requestedSeconds)
-      fingerprint = loopFingerprint(agent.sessionId, cadenceSeconds, identity)
-      offsetMinutes = jitterMinutes(fingerprint, cadenceSeconds)
-      expression = cronExpression(probe, offsetMinutes)
-    } else {
-      // A self-paced loop is driven by a recurring fixed-rate record: a fired
-      // one-shot turns inactive and then rejects `update` with `schedule_ended`,
-      // so it could never be re-armed by the model. The interval stored here is
-      // the currently armed wait, and `loop_next` replaces it in place.
-      cadenceSeconds = this.deps.config.safetyCheckSeconds
-    }
-    const state: LoopState = {
-      owner: ownerOf(agent.sessionId),
-      mode: request.mode,
-      startedBy: request.startedBy,
-      cadenceSeconds,
-      cadenceLabel,
-      fingerprint,
-      jitterSeconds: offsetMinutes * 60,
-      iteration: 0,
-      quietStreak: 0,
-      omissions: 0,
-      expiresAt: now + this.deps.config.lifetimeDays * 86_400_000,
-      lastRunAt: now,
-      ...(request.taskFile === undefined ? {} : { taskFile: request.taskFile }),
-      ...(request.truncated === true ? { truncated: true } : {}),
-      ...(request.task === undefined ? {} : { task: request.task }),
-    }
-    const title = buildTitle(state)
-    const { prompt } = buildPrompt(state)
     let created: ScheduleRecordLike
     try {
       created =
-        expression === undefined
-          ? await schedule.create(agent.sessionId, {
-              prompt,
-              title,
+        plan.expression === undefined
+          ? await schedule!.create(agent.sessionId, {
+              prompt: plan.prompt,
+              title: plan.title,
               every_seconds: this.deps.config.safetyCheckSeconds,
             })
-          : await schedule.create(agent.sessionId, {
-              prompt,
-              title,
-              cron: { expression, time_zone: this.deps.timeZone },
+          : await schedule!.create(agent.sessionId, {
+              prompt: plan.prompt,
+              title: plan.title,
+              cron: { expression: plan.expression, time_zone: this.deps.timeZone },
             })
     } catch (error) {
       return { ok: false, text: `Could not create the loop reminder: ${messageOf(error)}` }
     }
     const firstWaitSeconds =
-      expression === undefined
+      plan.expression === undefined
         ? this.deps.config.safetyCheckSeconds
         : Math.max(0, Math.round((Date.parse(created.scheduledAt) - now) / 1000))
     // Deliver round one BEFORE anything about the session's previous state
@@ -292,30 +240,30 @@ export class LoopEngine {
       )
     }
     lines.push(`Id: ${shortId(created.id)}`)
-    lines.push(`Title: ${title}`)
+    lines.push(`Title: ${plan.title}`)
     if (state.mode === 'self') {
       lines.push(
         `Cadence: self-paced — the wait is currently ${Math.round(state.cadenceSeconds / 60)} minute(s) (a recurring reminder), and you replace it each round with loop_next`,
       )
     } else {
       lines.push(
-        `Cadence: ${state.cadenceLabel}, wall-clock anchored (cron \`${created.expression ?? expression}\`, time zone ${this.deps.timeZone})`,
+        `Cadence: ${state.cadenceLabel}, wall-clock anchored (cron \`${created.expression ?? plan.expression}\`, time zone ${this.deps.timeZone})`,
       )
-      const cap = jitterCapMinutes(cadenceSeconds)
+      const cap = jitterCapMinutes(plan.cadenceSeconds)
       lines.push(
-        offsetMinutes > 0
-          ? `Jitter: ${offsetMinutes * 60}s = ${offsetMinutes} minute(s), drawn from min(10% of the normalized cadence, 15 min) with fingerprint ${fingerprint}`
+        plan.offsetMinutes > 0
+          ? `Jitter: ${plan.jitterSeconds}s = ${plan.offsetMinutes} minute(s), drawn from min(10% of the normalized cadence, 15 min) with fingerprint ${plan.fingerprint}`
           : cap === 0
-            ? `Jitter: 0 (minute precision cannot express a smaller offset for this cadence; fingerprint ${fingerprint})`
-            : `Jitter: 0 (the fingerprint drew no offset; this cadence could carry up to ${cap} minute(s). fingerprint ${fingerprint})`,
+            ? `Jitter: 0 (minute precision cannot express a smaller offset for this cadence; fingerprint ${plan.fingerprint})`
+            : `Jitter: 0 (the fingerprint drew no offset; this cadence could carry up to ${cap} minute(s). fingerprint ${plan.fingerprint})`,
       )
-      if (approximation !== undefined) lines.push(`Approximation: ${approximation}.`)
+      if (plan.approximation !== undefined) lines.push(`Approximation: ${plan.approximation}.`)
       lines.push(
         'Round counters: the cron rule fires on its own, so the stored iteration counter does not advance; /loop status reports the real delivery count, the quiet streak and the omission count.',
       )
     }
     lines.push(
-      expression === undefined
+      plan.expression === undefined
         ? `First wait: ${Math.round(firstWaitSeconds / 60)} minute(s) (self-paced safety check); round 1 runs immediately now.`
         : `First fire: ${created.scheduledAt} (${Math.round(firstWaitSeconds / 60)} minute(s)); round 1 runs immediately now.`,
     )
@@ -327,6 +275,32 @@ export class LoopEngine {
       `Task: ${request.taskFile === undefined ? `${taskCodePoints} code points, inline` : `${request.taskFile} (file budget: bytes)`}`,
     )
     return { ok: true, text: lines.join('\n') }
+  }
+
+  /**
+   * Build the shared planner's input for one start request.
+   *
+   * Keeping the mapping in one place is what makes `start` and the read-only
+   * preview plan from byte-identical inputs.
+   *
+   * @param agent - Calling agent.
+   * @param request - Mode and task source.
+   * @param now - Epoch milliseconds the plan is anchored at.
+   * @returns The planner input.
+   */
+  private planInputOf(agent: LoopAgent, request: StartRequest, now: number): PlanInput {
+    return {
+      sessionId: agent.sessionId,
+      mode: request.mode,
+      startedBy: request.startedBy,
+      ...(request.requestedSeconds === undefined ? {} : { requestedSeconds: request.requestedSeconds }),
+      ...(request.task === undefined ? {} : { task: request.task }),
+      ...(request.taskFile === undefined ? {} : { taskFile: request.taskFile }),
+      ...(request.truncated === true ? { truncated: true } : {}),
+      config: this.deps.config,
+      timeZone: this.deps.timeZone,
+      now,
+    }
   }
 
   /**
@@ -383,7 +357,7 @@ export class LoopEngine {
       )
       lines.push(`  round limit: ${this.deps.config.maxRounds} (reaching it stops the loop)`)
       lines.push(
-        `  task: ${loop.state.taskFile ?? `${codePointLength(loop.state.task ?? '')} code points inline`}`,
+        `  task: ${loop.state.taskFile ?? `${countCodePoints(loop.state.task ?? '')} code points inline`}`,
       )
       if (tally.truncated) {
         lines.push('  note: the delivery history was longer than one walk reads, so the count is a lower bound.')
@@ -711,17 +685,14 @@ function messageOf(error: unknown): string {
 /**
  * Count the code points of one string.
  *
- * `String.length` counts UTF-16 code units, so an astral character would count
- * as two. The inline task budget is documented in code points, and the default
- * task file budget in bytes (`src/loopfile.ts`), so the two units are never
- * silently mixed.
+ * Re-exported from the shared planner so the plugin keeps exactly one
+ * implementation of the code-point budget and every existing importer keeps
+ * working.
  *
  * @param text - Text to measure.
  * @returns The number of Unicode code points.
  */
-export function codePointLength(text: string): number {
-  return [...text].length
-}
+export { countCodePoints as codePointLength }
 
 /** First line of a loop's task, short enough for a log line. */
 function taskSummary(state: LoopState): string {

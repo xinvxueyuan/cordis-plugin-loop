@@ -1,11 +1,11 @@
 /**
- * Grammar tests: the eight accepted call forms, the reserved words, and the
- * interval vocabulary.
+ * Grammar tests: the seven accepted call forms, the reserved words, the
+ * interval vocabulary, and the leading preview flag.
  * @module cordis-plugin-loop/test/grammar
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { parseInterval, parseLoopInput } from '../src/grammar.ts'
+import { parseInterval, parseLoopInput, stripDryRunFlag } from '../src/grammar.ts'
 
 test('bare /loop is its own form', () => {
   assert.deepEqual(parseLoopInput(''), { kind: 'naked' })
@@ -103,4 +103,79 @@ test('an interval-form task keeps its exact text', () => {
   if (parsed.kind !== 'interval-task') return
   assert.equal(parsed.interval.seconds, 7200)
   assert.equal(parsed.task, 'tidy the repo every friday')
+})
+
+test('the preview flag is lifted only as the first token, and only on an exact match', () => {
+  // Leading: lifted, and the rest is the same input the grammar already knows.
+  assert.deepEqual(stripDryRunFlag('--dry-run'), { dryRun: true, input: '' })
+  assert.deepEqual(stripDryRunFlag('  --dry-run  '), { dryRun: true, input: '' })
+  assert.deepEqual(stripDryRunFlag('--dry-run 10m'), { dryRun: true, input: '10m' })
+  assert.deepEqual(stripDryRunFlag('--dry-run watch the queue'), {
+    dryRun: true,
+    input: 'watch the queue',
+  })
+  assert.deepEqual(stripDryRunFlag('--dry-run 10m watch the queue'), {
+    dryRun: true,
+    input: '10m watch the queue',
+  })
+  // Not leading: the word is task text and must survive verbatim, or a preview
+  // would swallow part of the work it is previewing.
+  for (const input of [
+    '10m check the --dry-run flag',
+    'check the --dry-run flag',
+    '--dry-run-ish task',
+    '--dry-runx',
+    'a --dry-run',
+  ]) {
+    assert.deepEqual(stripDryRunFlag(input), { dryRun: false, input }, `"${input}" must not be stripped`)
+  }
+  // An input without the flag is handed back untouched, not trimmed: every
+  // existing path must keep the exact text it was given.
+  assert.deepEqual(stripDryRunFlag(''), { dryRun: false, input: '' })
+  assert.deepEqual(stripDryRunFlag('  10m  x  '), { dryRun: false, input: '  10m  x  ' })
+})
+
+test('a stripped flag leaves a start form the grammar still recognizes', () => {
+  for (const input of ['', '10m', 'watch the queue', '10m watch the queue']) {
+    const flag = stripDryRunFlag(`--dry-run ${input}`)
+    assert.equal(flag.dryRun, true)
+    assert.deepEqual(parseLoopInput(flag.input), parseLoopInput(input), `"${input}" must parse identically`)
+  }
+})
+
+test('any whitespace after the flag separates it, and end of input counts as one', () => {
+  // This is the case with real consequences: a caller who wrote a tab meant a
+  // preview, and failing to recognize the flag turns the whole line into task
+  // text and *arms a real loop*. So every separator is checked, not just a space.
+  const separated: [string, string][] = [
+    ['--dry-run 10m watch the queue', '10m watch the queue'],
+    ['--dry-run\t10m watch the queue', '10m watch the queue'],
+    ['--dry-run\n10m watch the queue', '10m watch the queue'],
+    ['--dry-run\r\n10m watch the queue', '10m watch the queue'],
+    ['--dry-run  10m', '10m'],
+    ['--dry-run\t\twatch the queue', 'watch the queue'],
+    ['--dry-run\n', ''],
+    ['--dry-run\t', ''],
+  ]
+  for (const [input, rest] of separated) {
+    assert.deepEqual(
+      stripDryRunFlag(input),
+      { dryRun: true, input: rest },
+      `"${JSON.stringify(input)}" must be recognized as the flag`,
+    )
+  }
+  // End of input, in every surrounding-whitespace shape.
+  for (const input of ['--dry-run', '--dry-run ', '--dry-run\t', '  --dry-run\n  ']) {
+    assert.deepEqual(stripDryRunFlag(input), { dryRun: true, input: '' }, `"${JSON.stringify(input)}"`)
+  }
+  // And the tab form still reaches the same start form a space form does.
+  assert.deepEqual(parseLoopInput(stripDryRunFlag('--dry-run\t10m watch the queue').input), {
+    kind: 'interval-task',
+    interval: { text: '10m', amount: 10, unit: 'm', seconds: 600 },
+    task: 'watch the queue',
+  })
+  // The stricter cases stay strict: only an exact, leading, whole-token match.
+  for (const input of ['--dry-runny', '--dry-run-ish task', '--dry-runx', '10m check the --dry-run flag']) {
+    assert.deepEqual(stripDryRunFlag(input), { dryRun: false, input }, `"${input}" must not be stripped`)
+  }
 })
