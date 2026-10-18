@@ -526,7 +526,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 ---
 
-### 发布记录：v0.2.2（2026-10-18）—— 放宽 DSH peer 范围，接受 `0.2.1-rc.2`（**npm 已入队，待维护者 2FA 批准**）
+### 发布记录：v0.2.2（2026-10-18）—— 放宽 DSH peer 范围，接受 `0.2.1-rc.2`（**已上线 npm `latest`**）
 
 | 项 | 值 |
 |---|---|
@@ -535,7 +535,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | tag | annotated + GPG `v0.2.2`；tag 对象 `afb01e5b29a7332bfe6d5850ae4ed8ba92d28641`，指向提交 `a96f588d5dff1dee9afc9724bef0c5db91190821`；`git tag -v` = Good signature（`xinvxueyuan (github)`，密钥 `6C6FD9B2…B35A`）。`v0.2.1 c12352ff…`、`v0.2.0 84dbce4b…`、`v0.1.1 e68b3fa0…`、`v0.1.0 9ae22118…` **未移动** |
 | 提交 | `a96f588d`「release: v0.2.2 — widen DSH peer ranges to accept 0.2.1-rc.2」，**3 条显式路径**（无 `lib/`、无 `node_modules/`、未用 `git add -A`／`.`），3 files changed, +8/−8；push `main` 后该 sha 命中 **0 条 run**（未触发发布） |
 | CI | Publish run [`39104757419`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39104757419) **success**：`Test (node 24)`、`Publish to GitHub Packages`、`Stage for npm` 三个 job 全绿；Release run [`39104757427`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39104757427) **success** |
-| npm 入队 | **已 stage，未上线**：stage id `8271dcca-43d8-4d45-b5fc-abc07847c71e`、shasum `4d802c27da6cdc0665971fb7b5849b05bab52c00`、provenance `logIndex=3307633281`（`npm stage list` 只读复核：`status: staged`、`tag: latest`、`access: public`、`staged by: GitHub Actions (trusted automation)`）；registry 仍 `dist-tags.latest = 0.2.1`。批准动作（`npm stage approve 8271dcca-43d8-4d45-b5fc-abc07847c71e`）由**维护者本人在 2FA 下**执行，发布者未代做 |
+| npm 上线 | **已上线 2026-10-18T06:45:07.255Z（本地 14:45:07）**：`dist-tags.latest = 0.2.2`、`dist.shasum = 4d802c27da6cdc0665971fb7b5849b05bab52c00`（与 stage 回执逐字一致）、`npm stage list` 已清空（`No staged versions of package name "@xinvxueyuan/cordis-plugin-loop".`）、`dist.attestations.provenance.predicateType = https://slsa.dev/provenance/v1`、`versions` 数组含 `0.2.2`。入队与来源：**stage id `8271dcca-43d8-4d45-b5fc-abc07847c71e`、shasum `4d802c27…`、provenance `logIndex=3307633281`**（`npm stage list` 曾只读复核逐字一致：`status: staged`、`tag: latest`、`access: public`、`staged by: GitHub Actions (trusted automation)`）；批准动作（`npm stage approve 8271dcca-43d8-4d45-b5fc-abc07847c71e`）由**维护者本人在 2FA 下**执行，发布者未代做 |
 | Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.2.2>，三资产：`xinvxueyuan-cordis-plugin-loop-0.2.2.tgz`（140 890 B）、`SHA256SUMS`（107 B）、`SHA256SUMS.asc`（887 B，维护者对 `SHA256SUMS` 的分离签名，`gpg --verify` 为 Good signature） |
 | tgz 校验 | 下载后重算 SHA256 = `1657b2708d4ee0f66d2290a059aa97c9f8f3a8792bd72a5bd79ce8616e6a17a7`，与 `SHA256SUMS` 逐字一致；其 **SHA1 = `4d802c27da6cdc0665971fb7b5849b05bab52c00`** == stage shasum ⇒ 与入队 tarball 是同一份字节 |
 | 构建来源证明 | `gh attestation verify <tgz\|SHA256SUMS> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.2.2` 两者均**退出 0**；负向对照 `refs/heads/main` 被拒（`expected SourceRepositoryRef to be refs/heads/main, got refs/tags/v0.2.2`）⇒ 只命中本 tag |
