@@ -542,6 +542,20 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | GitHub Packages | **`cordis-plugin-loop@0.2.2`**，包 id `15868485`、版本 id **`1403958109`**（2026-10-18T06:39:00Z） |
 | 验证 | 版本固化后 `npm ci --dry-run` exit 0（`up to date in 920ms`）；build / typecheck / `npm test`（**200/200 · 10 suites · 3462.7315 ms · 自然退出**）全 exit 0；stage 日志 47 files、package size 140.9 kB、unpacked 515.3 kB |
 
+### 发布记录：v0.2.3（2026-10-19）—— **真正**让 DSH peer 范围接受 `0.2.1-rc.2`（**已上线 npm `latest`**）
+
+| 项 | 值 |
+|---|---|
+| 内容 | 仅改 `package.json` 与 `package-lock.json`。**v0.2.2 的"放宽"实际无效**：它把精确 `0.2.0-rc.2` 改成 `^0.2.0-rc.2`，而预发布版本只有与范围中某个比较器**同 `[major,minor,patch]` 元组**时才匹配——`satisfies('0.2.1-rc.2', '^0.2.0-rc.2')` 实测为 `false`，即它宣称接受 `0.2.1-rc.2`，实际从未接受。本版把 4 条 peer 改为 `^0.2.0-rc.2 \|\| ^0.2.1-rc.2`，实测同时满足 `0.2.0-rc.2`（latest）与 `0.2.1-rc.2`（next）；`dsh-*` devDeps 升到 `0.2.1-rc.2`，唯 `@deepseek-ai/dsh-invariants` 保持 `^0.2.0-rc.2`（registry 上该包**没有** `0.2.1-rc.2`，其 `next` 仍是 `0.2.0-rc.2`） |
+| 代码 delta | 恰两个文件：`package.json`（version + 4 条 peer + 17 条 devDep）、`package-lock.json`（重生）。`src/`、`test/`、`README.md` 未改；+633/−636 |
+| tag | annotated + GPG `v0.2.3`；tag 对象 `96defff9bd19efc0d59e7db81113ec051f6504e5`，指向提交 `4eddd56190785cb47e1b75ec76a3cf11982603ed`；`git tag -v` = Good signature（`xinvxueyuan (github)`，密钥 `6C6FD9B2…B35A`）。历史 tag（`v0.2.2 afb01e5b…` 等）**未移动** |
+| CI | Publish run [`39146362415`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39146362415) **success**；Release run [`39146362813`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39146362813) **success** |
+| npm 上线 | **已上线 2026-10-19**：`dist-tags.latest = 0.2.3`、`dist.shasum = ee9367d2eb7213e5043562220908d9ea44b30a1c`。入队来源：stage id `3ffca56f-3b70-4894-9aee-30d11c05427f`、shasum `ee9367d2…`、`staged by: GitHub Actions (trusted automation)`；批准（`npm stage approve 3ffca56f-…`）由**维护者本人在 2FA 下**执行，发布者未代做；批准后 `npm stage list` 已清空 |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.2.3>，资产 `xinvxueyuan-cordis-plugin-loop-0.2.3.tgz`（141 709 B）与 `SHA256SUMS` |
+| tgz 校验 | 下载后重算 SHA256 = `2091dcd03173a737315d48475572f52167dd6212f08be5d14519e5176a7140a2`，与 `SHA256SUMS` 逐字一致；其 **SHA1 = `ee9367d2eb7213e5043562220908d9ea44b30a1c`** == npm 上 published shasum ⇒ 与 npm 那份**是同一份字节** |
+| 构建来源证明 | `gh attestation verify <tgz> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.2.3` **退出 0**；负向对照 `refs/heads/main` **退出 1** ⇒ 证明只命中本 tag |
+| 验证 | 独立验证者（与实现者无共享上下文）在 `%TEMP%` 副本自写探针复跑：`npm ci` / `typecheck` / `test`（**200/200**）/ `build` 全 exit 0；14 条 `dsh-*` peer 范围实测覆盖 `0.2.1-rc.2` 与 `0.2.0-rc.2`；活体闸门在真实宿主确认 `loop_status` 可答、`loop_stop` 在无 loop 时**明确拒绝** |
+
 ---
 
 <a id="english"></a>
