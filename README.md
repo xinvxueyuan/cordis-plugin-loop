@@ -7,7 +7,7 @@ DeepSeek Harness（DSH）插件：实现 `/loop` 指令 —— **立刻跑一轮
 本插件复用宿主已有的 `@deepseek-ai/dsh-schedule`（持久提醒服务）承载每一条 loop：一行任务的**标题与正文**是 loop 的全部可变状态，因此 `loop_next`、`/loop stop` 与遗漏安全网都只需 `ctx.schedule.update` 就地替换同一条记录，会话内 loop 记录数在**正常路径**下恒为 1（唯一的例外是替换时旧记录删除被存储层拒绝——那时两条并存并如实告知，见[自定节奏](#自定节奏)）。
 
 - 包名：`@xinvxueyuan/cordis-plugin-loop`
-- 版本：`0.1.0`
+- 版本：`0.2.2`
 - 依赖：`@deepseek-ai/cordis`（必需 `tools`）；`@deepseek-ai/dsh-schedule`、`@deepseek-ai/dsh-commands` 为**可选**同伴依赖
 
 ---

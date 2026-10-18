@@ -1,6 +1,6 @@
 {
   "name": "@xinvxueyuan/cordis-plugin-loop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Cordis (DeepSeek Harness) plugin: the /loop command — run a task now, then keep it going on a fixed cadence or a model-chosen one",
   "type": "module",
   "main": "lib/index.js",
@@ -72,10 +72,10 @@
   "license": "MIT OR Apache-2.0",
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",
-    "@deepseek-ai/dsh-commands": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-schedule": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-commands": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-schedule": "^0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "~3.18.4"
   },
   "peerDependenciesMeta": {
