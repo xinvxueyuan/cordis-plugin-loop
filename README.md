@@ -612,7 +612,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 
 ---
 
-### 发布记录：v0.3.0（2026-10-19）—— `/loop --dry-run` 预览 + `loop_start({dryRun})`（**npm 已入队、待维护者 2FA 批准**）
+### 发布记录：v0.3.0（2026-10-19）—— `/loop --dry-run` 预览 + `loop_start({dryRun})`（**已上线 npm `latest`**）
 
 | 项 | 值 |
 |---|---|
@@ -622,7 +622,7 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | 提交 | `8250d213`「release: v0.3.0 — /loop --dry-run preview and loop_start({dryRun})」；GPG 签名 `%G? = G`；push `main` 后按该 sha 过滤 run 列表命中 **0 条 run**（未触发发布） |
 | 冻结锚 | 质量门 r2 绑定：45 文件逐文件 sha256（口径 `git ls-files --cached --others --exclude-standard` → 排除 `node_modules`/`lib`/`.git` → 序数排序；**逐文件才是判据，聚合仅索引**）；发布者复算与绑定的 14 条逐字 **MATCH**，其余 31 个文件经 `git hash-object` 与 `HEAD` 逐字节比对一致 |
 | CI | Publish run [`39176407361`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39176407361) **success**，三个 job **全部执行且 success（无一 skipped）**：`Test (node 24)`（`tests 217 · suites 10 · pass 217 · fail 0 · duration_ms 3257.575113`）、`Stage for npm (trusted publishing + human 2FA approval)`、`Publish to GitHub Packages (npm.pkg.github.com)`；Release run [`39176407464`](https://github.com/xinvxueyuan/cordis-plugin-loop/actions/runs/39176407464) **success** |
-| npm stage（**已入队，未上线**） | stage id `1e520c88-0ba7-4827-bfb5-b3d6d874ec8a`、shasum `743571d014502a35c8f3f167d14915b5729abecc`、provenance `logIndex=3318192747`；`npm stage list` 只读复核逐字一致：`status: staged`、`tag: latest`、`access: public`、`staged by: GitHub Actions (trusted automation)`、`date staged: 2026-10-18T23:25:21.736Z`。**截至本次记录 `dist-tags.latest` 仍为 `0.2.3`、`versions` 数组不含 `0.3.0`** —— 该版本**已入队但未经 2FA 批准，尚未上线**；批准命令 `npm stage approve 1e520c88-0ba7-4827-bfb5-b3d6d874ec8a` 由**维护者本人在 2FA 下**执行，发布者**未代做**（本轮未 approve、未 `npm login`、未做 2FA） |
+| npm 上线 | **已上线 2026-10-19T00:05:01.267Z（UTC；= 本地 08:05:01）**：`dist-tags.latest = 0.3.0`、`dist.shasum = 743571d014502a35c8f3f167d14915b5729abecc`（与 stage 回执**逐字一致**）、`npm stage list` 队列已清空（`No staged packages found.`）、`dist.attestations.provenance.predicateType = https://slsa.dev/provenance/v1`、`versions` 数组含 `0.3.0`（`0.2.3` 的上线时刻仍为 `2026-10-18T17:01:06.992Z`，未被改写）。入队与来源：**stage id `1e520c88-0ba7-4827-bfb5-b3d6d874ec8a`、shasum `743571d0…`、provenance `logIndex=3318192747`**（`npm stage list` 曾只读复核逐字一致：`status: staged`、`tag: latest`、`access: public`、`staged by: GitHub Actions (trusted automation)`、`date staged: 2026-10-18T23:25:21.736Z`）；批准（`npm stage approve 1e520c88-0ba7-4827-bfb5-b3d6d874ec8a`）由**维护者本人在 2FA 下**执行，发布者**未代做**（本轮未 approve、未 `npm login`、未做 2FA） |
 | Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.3.0>，三资产：`xinvxueyuan-cordis-plugin-loop-0.3.0.tgz`（157 946 B）、`SHA256SUMS`（107 B）、`SHA256SUMS.asc`（887 B，维护者对 `SHA256SUMS` 的分离签名，`gpg --verify` 为 Good signature）。`.asc` **不由 CI 产出**：`release.yml` 只生成前两者，`.asc` 由维护者本机补签后上传 |
 | tgz 校验 | 从 Release 下载后重算 SHA256 = `fec31622721f00080cd81dfa9005abb6845f476ea24a37b132ac26dce3125412`，与 `SHA256SUMS` 逐字一致；其 **SHA1 = `743571d014502a35c8f3f167d14915b5729abecc`** == stage shasum ⇒ Release 的字节与入队的是**同一份** |
 | 构建来源证明 | `gh attestation verify <tgz\|SHA256SUMS> --repo xinvxueyuan/cordis-plugin-loop --source-ref refs/tags/v0.3.0` 两者均**退出 0**；负向对照 `refs/heads/main` 两者均**退出 1**（`expected SourceRepositoryRef to be refs/heads/main, got refs/tags/v0.3.0`）；证明 JSON 全文对 `refs/heads/` **零命中**（`refs/tags/v0.3.0` 命中 8 处），SAN = `…/release.yml@refs/tags/v0.3.0`、`externalParameters.workflow.ref = refs/tags/v0.3.0`、`resolvedDependencies = git+…@refs/tags/v0.3.0@8250d213…` ⇒ 只命中本 tag |
@@ -633,7 +633,12 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 | 活体闸门 | 队长在根会话、冻结字节上实测：固定档预览打印完整标签面且**无 `Id:`**、如实报出将被替换的真记录；预览后 `loop_status` 的 `nextAt` 未变（**零副作用**）；真启动 / `loop_stop` / 再 `loop_status` 全链路正常；自定档预览无 `Cron:`/`Jitter:` 行（与契约一致）；活体工具表 `loop_start` description 与源码逐字一致；`client.js` 全程零改动（`428d0f58df5af7ac393dddb69cd38e85580e978283cbbca6c77184983536f2ef`）。**未覆盖（如实）**：`/loop --dry-run` 的**命令面**无法由模型执行（模型不能直接发斜杠命令），它由冻结字节上的用例覆盖（真 `CommandRuntime`），且与工具面共用同一 `stripDryRunFlag` |
 | 环境边界（如实） | 发布者本地 `npm test` 跑的是**本地已装**的 dsh `0.2.0-rc.2`（lock 已钉 `0.2.1-rc.2`/`cordis 4.0.5`，但本地 `node_modules` 未重装），而 **CI 的 `Test (node 24)` 走干净 `npm ci`、跑 `0.2.1-rc.2`** —— 两侧运行期 peer 不同（与 v0.2.3 发布时相同）。`npm ci --dry-run` exit 0 ⇒ `package.json` 与 lock **同步**；发布者未擅自 `npm install`（会动 `node_modules`） |
 
-**后续（维护者批准后补记）**：批准 `npm stage approve 1e520c88-0ba7-4827-bfb5-b3d6d874ec8a` 后，`dist-tags.latest` 应变为 `0.3.0`、`dist.shasum` 应与 `743571d014502a35c8f3f167d14915b5729abecc` 逐字相同、`npm stage list` 队列应清空、`dist.attestations.provenance.predicateType` 应为 `https://slsa.dev/provenance/v1`。
+**上线复核（现查，非转述）**：`npm view @xinvxueyuan/cordis-plugin-loop version dist-tags dist.shasum --json` ⇒ `version 0.3.0`、`dist-tags.latest 0.3.0`、`dist.shasum 743571d014502a35c8f3f167d14915b5729abecc`（与交回的 stage shasum **逐字相同** ⇒ 上线的那份与入队/Release 的是同一份字节）；`npm stage list` ⇒ `No staged packages found.`（队列已清空）。
+
+#### 已知边界与待办（0.3.1 backlog，仅记录、未在本版处理）
+
+1. **`/loop stop` 不撤回"已排队的那一轮"**：宿主 `dsh-schedule` 的语义是**删除不撤回已投递的提醒**（其 `schedule_delete` 描述原文如此）。因此停止一个 loop 后，此前已排队/已投递的那一轮消息仍可能浮现。活体闸门实测撞到过一次（`loop_stop` 返回成功后，首轮消息仍出现）。这是**宿主调度行为、非本插件缺陷**，且不影响记录与投影的正确性（`loop_status` 立刻如实变为 `active:false`）；本版仅在文档中如实记录该边界。
+2. **`test/loopfile.test.ts` 会遗留 `%TEMP%\loopfile-*` 目录**：验证者实测残留 **168 个**，疑为 `mkdtemp` 后未清理。**非本版引入**（既有测试），不影响发布产物与 CI 结果（CI 为一次性 runner），记为 0.3.1 待办。
 
 ---
 
