@@ -659,6 +659,19 @@ git push origin v0.1.0                            # 触发 publish.yml（staged�
 1. **`/loop stop` 不撤回"已排队的那一轮"**：宿主 `dsh-schedule` 的语义是**删除不撤回已投递的提醒**（其 `schedule_delete` 描述原文如此）。因此停止一个 loop 后，此前已排队/已投递的那一轮消息仍可能浮现。活体闸门实测撞到过一次（`loop_stop` 返回成功后，首轮消息仍出现）。这是**宿主调度行为、非本插件缺陷**，且不影响记录与投影的正确性（`loop_status` 立刻如实变为 `active:false`）；本版仅在文档中如实记录该边界。
 2. **`test/loopfile.test.ts` 会遗留 `%TEMP%\loopfile-*` 目录**：验证者实测残留 **168 个**，疑为 `mkdtemp` 后未清理。**非本版引入**（既有测试），不影响发布产物与 CI 结果（CI 为一次性 runner），记为 0.3.1 待办。
 
+### 发布记录：v0.4.0（2026-10-20）—— 以官方 bundle 形态发布（**已上线 npm `latest`**）
+
+| 项 | 事实 |
+|---|---|
+| 内容 | 新增 `cordis.patch.yml`（Loader row `loop` + 显式 `inject: [tools, schedule]`）、`package.json` 的 `dsh.bundle.patch` 与顶层 `icon`、`locale/{en,zh}.json`、`icon.svg`、`test/manifest.test.ts`（守护 patch、`inject` 与源码集合相等、显示资源与打包面）；`dsh.client` 与 `client.js` **零改动** |
+| 提交 | `23ba97e`「feat: ship as an official DSH bundle (v0.4.0)」，8 条显式路径；推送 `main` 后命中 **0** 条 run |
+| tag | annotated + GPG `v0.4.0`；tag 对象 `498cfc42dd6fa516b2c43c2c4b726bf191917e0c`；`git tag -v` = **Good signature**（`xinvxueyuan (github)`，密钥 `6C6FD9B2…B35A`） |
+| CI | Publish run `39387232937`（`Test (node 24)` ✅ / `Publish to GitHub Packages` ✅ / **`Stage package (with provenance)` 真的执行** ✅）、Release run `39387233114` ✅ |
+| stage | stage id `0b991c59-2a93-4c97-962d-0683b7f07f6e`、shasum `bd06483dbf609830cba748c22a997ca592cdb799`（`access: public`、`tag: latest`、`actorType: trusted automation`），由维护者 2FA 批准上线 |
+| 上线复核（现查） | `dist-tags.latest = 0.4.0`、`dist.shasum = bd06483d…`（**与 stage shasum、Release tgz 的 SHA1 逐字相同**）、`dist.attestations.provenance.predicateType = https://slsa.dev/provenance/v1`、`dsh.bundle.patch = ./cordis.patch.yml` 与 `icon = icon.svg` 确实在 npm 上；上线时间 `2026-10-20T07:41:31.464Z`；`npm stage list` 已空 |
+| Release | <https://github.com/xinvxueyuan/cordis-plugin-loop/releases/tag/v0.4.0>，本轮为 CI 两资产：`xinvxueyuan-cordis-plugin-loop-0.4.0.tgz`（162 685 B）与 `SHA256SUMS`（107 B）；本地复算 tgz 的 SHA256 与 `SHA256SUMS` 逐字一致（本轮未附手签 `.asc`） |
+| 验证 | 门禁 `225/225` 全绿；质量门内容层 pass（12/12 门禁、三类变异精确打红），发布层先 `needs_revision`（版本已被占用）→ 版本冻结后逐字节复核**非预期漂移 0** 再发 |
+
 ---
 
 <a id="english"></a>
