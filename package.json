@@ -1,16 +1,20 @@
 {
   "name": "@xinvxueyuan/cordis-plugin-loop",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cordis (DeepSeek Harness) plugin: the /loop command — run a task now, then keep it going on a fixed cadence or a model-chosen one",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "icon": "icon.svg",
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -18,6 +22,9 @@
     "client.js",
     "lib",
     "src",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
     "README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE"
@@ -31,6 +38,9 @@
     "access": "public"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
@@ -46,7 +56,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
-    "test": "node --test test/platform-neutral.test.ts test/grammar.test.ts test/cadence.test.ts test/loopfile.test.ts test/state.test.ts test/command.test.ts test/tools.test.ts test/lifecycle.test.ts test/register.test.ts test/integration.test.ts test/preview.test.ts test/client-capsule.test.ts test/client-live-path.test.ts",
+    "test": "node --test test/platform-neutral.test.ts test/grammar.test.ts test/cadence.test.ts test/loopfile.test.ts test/state.test.ts test/command.test.ts test/tools.test.ts test/lifecycle.test.ts test/register.test.ts test/integration.test.ts test/preview.test.ts test/client-capsule.test.ts test/client-live-path.test.ts test/manifest.test.ts",
     "test:smoke:client": "node test/client-live-smoke.ts",
     "test:integration": "node test/integration-smoke.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"

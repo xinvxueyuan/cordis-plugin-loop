@@ -7,14 +7,15 @@ DeepSeek Harness（DSH）插件：实现 `/loop` 指令 —— **立刻跑一轮
 本插件复用宿主已有的 `@deepseek-ai/dsh-schedule`（持久提醒服务）承载每一条 loop：一行任务的**标题与正文**是 loop 的全部可变状态，因此 `loop_next`、`/loop stop` 与遗漏安全网都只需 `ctx.schedule.update` 就地替换同一条记录，会话内 loop 记录数在**正常路径**下恒为 1（唯一的例外是替换时旧记录删除被存储层拒绝——那时两条并存并如实告知，见[自定节奏](#自定节奏)）。
 
 - 包名：`@xinvxueyuan/cordis-plugin-loop`
-- 版本：`0.2.2`
-- 依赖：`@deepseek-ai/cordis`（必需 `tools`）；`@deepseek-ai/dsh-schedule`、`@deepseek-ai/dsh-commands` 为**可选**同伴依赖
+- 版本：`0.4.0`
+- 依赖：`inject` 里的**硬依赖**是 `tools`（`@deepseek-ai/dsh-tools`）与 `schedule`（`@deepseek-ai/dsh-schedule`）；`commands`（`@deepseek-ai/dsh-commands`）是**可选（reactive）**。三个包在 `peerDependencies` 里都声明为**可选 peer**，旧版 DSH 上不阻塞安装。
 
 ---
 
 ## 目录
 
 - [安装与装配](#安装与装配)
+- [组合节点（官方）](#组合节点官方)
 - [语法](#语法)
 - [节奏归一与抖动](#节奏归一与抖动)
 - [loop 记录格式](#loop-记录格式)
@@ -39,7 +40,9 @@ plugins:
   '@xinvxueyuan/cordis-plugin-loop': {}
 ```
 
-`ctx.schedule` 缺失时插件**惰性**：不注册命令与工具，只写一条警告日志；插件 fiber 仍然 ACTIVE，绝不因为缺少可选服务而让整个 profile 起不来。
+`schedule` 是 `inject` 里的**硬依赖**：真实装配下它缺失时，Cordis 会让本插件**不激活** —— 零命令、零工具、零记录，profile 照常启动（本插件起不来不会拖垮整个 profile）。
+
+`apply` 内另保留一条**防御性惰性路径**：若某个组合强行挂载本插件而没有 `schedule`（例如覆盖 `inject`，测试 harness 正是这么挂的），它只写一条警告日志、不注册任何东西，fiber 保持 ACTIVE。两条路径都不注册任何表面，区别只在"是否激活"。
 
 命令行表面需要 `ctx.commands`（`@deepseek-ai/dsh-commands`）。缺少它时工具照常注册，并额外写一条警告说明命令面缺失。
 
@@ -48,6 +51,22 @@ plugins:
 `package.json` 把两者声明为**可选 peer**（`peerDependencies` + `peerDependenciesMeta.optional: true`，与本仓对 `dsh-schedule`/`dsh-commands` 的写法一致）：这样依赖关系是机器可读的，又不会在旧版 DSH 上**阻塞安装**（必需 peer 会）。
 
 **产物的 `.d.ts` 也引用这两个包**，所以**隔离消费方的类型检查需要宿主已装它们**：`lib/index.d.ts` 有 `import { createUserMessage } from '@deepseek-ai/dsh-llm'`，`lib/config.d.ts` 有 `import z from '@deepseek-ai/schemastery'`。隔离环境实测会报 `lib/index.d.ts … TS2307: Cannot find module '@deepseek-ai/dsh-llm'` 与 `lib/config.d.ts … TS2307: Cannot find module '@deepseek-ai/schemastery'`——这是声明缺失的表现，在本仓已通过上面的可选 peer + devDependency 表达清楚；只要宿主的 `node_modules` 可解析，消费方类型检查即通过。
+
+---
+
+## 组合节点（官方）
+
+本包以**官方 bundle 形态**发布：`package.json` 声明 `dsh.bundle.patch`，`cordis.patch.yml` 用一行 Loader entry（`id: loop`，`name` 为本包名）把它装进 profile。既然是 bundle，它消费的**官方服务节点**就必须在 patch 里显式声明，装载顺序才是确定的，而不是靠“服务碰巧先到”：
+
+| 服务键 | 官方提供方（row / 包） | 必需性 | 用途 |
+|---|---|---|---|
+| `tools` | row `tools` / `@deepseek-ai/dsh-tools` | 必需 | 注册 `loop_*` 工具 |
+| `schedule` | row `schedule` / `@deepseek-ai/dsh-schedule` | 必需 | 记录与投递轮次 |
+| `commands` | row `commands` / `@deepseek-ai/dsh-commands` | **可选（reactive）** | 注册 `/loop`；缺它时插件仍激活但无 `/loop` |
+
+- **`tools` 与 `schedule` 是硬依赖**：patch 的 `inject: [tools, schedule]` 与 `src/index.ts` 的 `export const inject = ['tools', 'schedule']` 一致，插件会等这两个服务就绪再 `apply`；缺任一个时不会在半装配状态先跑起来。
+- **`commands` 故意不进 `inject`**：命令面是可选的，`src/index.ts:316` 用 `ctx.inject(['commands'], …)` **反应式**注册——命令注册表晚到也能在不需要重载的情况下拿到 `/loop`；没有它时插件照常激活，只写一条警告。
+- **patch 与 `src/index.ts` 的 `inject` 必须一致**：前者决定 Loader 的装载顺序，后者决定 Cordis 的服务注入，两者是同一份事实的两处投影。`test/manifest.test.ts` 用两条正则分别从 patch 与源码提取名单并断言**集合相等**，任何一侧单独漂移都会让 `npm test` 红——所以改一处必须同时改另一处。
 
 ---
 
@@ -319,7 +338,7 @@ round_context: '{"loop":true,"round":2,"iteration":1,"quietStreak":0,"omissions"
 | 计划模式（`planMode.get(agent).active === true`，取自 `ctx.reflect.get('planMode', false)`） | 拒绝启动，**零记录、零 create、零 delete**，命令返回 `Plan mode is active …` |
 | `config.enabled: false` | 拒绝新建，并取消本插件已有 loop；取消前把任务文本写进 `logger.warn` |
 | 环境变量 `DSH_DISABLE_LOOP` | 同上（任何非 `''/0/false/off/no/n/disabled` 的取值都视为开启）；**只删除 owner 匹配的记录**，不匹配的残留需手动清除，见下 |
-| `ctx.schedule` 缺失 | 插件惰性：零命令、零工具、一条警告日志，fiber 仍 ACTIVE |
+| `ctx.schedule` 缺失 | **真实装配：不激活**（`inject` 硬依赖 ⇒ 零命令、零工具、零记录，profile 照常启动）；若组合覆盖 `inject` 强行挂载，则走 `apply` 的防御性惰性路径：零命令、零工具、一条警告日志，fiber 仍 ACTIVE |
 | `ctx.commands` 缺失 | 工具照常注册，一条警告说明命令面缺失 |
 | 子代理会话调用 `/loop`（启动/停止）| 明确拒绝 |
 | 子代理会话调用 `loop_next` / `loop_stop` | 明确错误：`A subagent session has no loop of its own to continue/stop.`（即使伪造了父会话 id 也拒绝） |

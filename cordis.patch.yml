@@ -1,0 +1,12 @@
+# Bundle patch for @xinvxueyuan/cordis-plugin-loop.
+# Applied by `plugin_manager install_bundle` (or any bundle layer that selects
+# this bundle); `id` is the Loader entry id and `name` is this package.
+# `inject` mirrors the hard dependencies declared in src/index.ts: the official
+# service nodes this plugin cannot work without. `commands` is deliberately NOT
+# listed: src/index.ts uses a reactive ctx.inject(['commands']) so a profile
+# without it still activates this plugin, only without the /loop command.
+- insert:
+    - id: loop
+      name: '@xinvxueyuan/cordis-plugin-loop'
+      inject: [tools, schedule]
+      config: {}
